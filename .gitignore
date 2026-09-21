@@ -3,6 +3,7 @@ data/projects.json
 npm-debug.log*
 workspaces/
 data/*.json.tmp
+data/autonomous-runs.json
 .npm-cache/
 .cache/
 .test-tmp/

@@ -279,3 +279,22 @@ test('real local fixture receives immediate stdin EOF with positional prompt', a
   assert.equal(result.stdout, 'EOF received');
   assert.equal(result.success, true);
 });
+
+test('isolated Codex runtime preserves a read-only host and only mounts runtime and assigned workspace writable', async t => {
+  const directory = await temporaryDirectory();
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const workspace = path.join(directory, 'workspace');
+  await fs.mkdir(workspace);
+  const provider = new CodexExecutionProvider({ isolatedRuntimeRoot: path.join(directory, 'runtime') });
+  const invocation = await provider.prepareInvocation(['exec', '--sandbox', 'workspace-write'], workspace);
+  assert.equal(invocation.command, '/usr/bin/bwrap');
+  assert.deepEqual(invocation.args.slice(2, 5), ['--ro-bind', '/', '/']);
+  const binds = invocation.args.flatMap((value, i) => value === '--bind' ? [invocation.args.slice(i + 1, i + 3)] : []);
+  assert.equal(binds.length, 2);
+  assert.ok(binds[0][0].startsWith(path.join(directory, 'runtime', 'execution-')));
+  assert.equal(binds[0][1], path.join(process.env.HOME, '.codex'));
+  assert.deepEqual(binds[1], [workspace, workspace]);
+  assert.equal(invocation.args.includes('--dangerously-bypass-approvals-and-sandbox'), false);
+  await fs.symlink(path.join(directory, 'runtime'), path.join(directory, 'link'));
+  await assert.rejects(() => new CodexExecutionProvider({ isolatedRuntimeRoot: path.join(directory, 'link') }).prepareInvocation([], workspace), /Unsafe Codex runtime/);
+});

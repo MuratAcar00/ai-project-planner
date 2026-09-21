@@ -297,3 +297,109 @@ test('missing execution infrastructure pauses without a code fix and resumes onl
   await f.service.resume(run.id);
   assert.equal((await finish(f.service, run.id)).state, 'completed');
 });
+
+test('Codex initialization stderr pauses before reserving any repair budget', async t => {
+  const f = await fixture(t, { execute: () => {
+    const error = new Error('Codex execution failed with exit code 1.');
+    error.executionResult = { terminationReason: 'process_exit', stderr: 'failed to initialize in-process app-server client: Read-only file system (os error 30)' };
+    throw error;
+  } });
+  const { run } = await f.service.start();
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.needsAttention, true);
+  assert.equal(paused.fixAttempts, 0);
+  assert.equal(paused.failureAnalysis.category, 'infrastructure');
+  assert.equal(f.calls.length, 1);
+  assert.equal(paused.events.some(item => item.type === 'fix_started'), false);
+});
+
+test('infrastructure diagnostics distinguish runtime failures from application failures', () => {
+  const { FailureAnalyzer } = require('../src/services/failure-analyzer');
+  const analyzer = new FailureAnalyzer();
+  for (const message of ['Read-only file system', 'Codex initialization failure', 'sandbox initialization failure', 'Unable to start Codex CLI', 'spawn EACCES']) {
+    assert.equal(analyzer.analyze({ kind: 'task', message }).category, 'infrastructure', message);
+  }
+  for (const terminationReason of ['spawn_error', 'process_error', 'stream_error']) {
+    assert.equal(analyzer.analyze({ kind: 'task', message: 'failed', output: { terminationReason } }).recoverable, false);
+  }
+  assert.equal(analyzer.analyze({ kind: 'task', message: 'AssertionError: expected 200 but received 500' }).recoverable, true);
+});
+
+test('controlled infrastructure recovery preserves identity, audit and refunds only infrastructure repairs', async t => {
+  const f = await fixture(t, { execute: () => { throw new Error('old generic exit code 1'); } });
+  const { run } = await f.service.start();
+  const failed = await finish(f.service, run.id);
+  assert.equal(failed.state, 'failed');
+  await assert.rejects(() => f.service.retryInfrastructureFailure(run.id), /infrastructure evidence/);
+  await f.dependencies.projectRepository.update(failed.projectId, project => {
+    for (const task of project.plan.phases.flatMap(p => p.tasks).filter(t => t.status === 'failed')) {
+      task.result = { stderr: 'failed to initialize in-process app-server client: Read-only file system' };
+    }
+    return true;
+  });
+  const originalUpdate = f.dependencies.runRepository.update.bind(f.dependencies.runRepository);
+  let rejectOnce = true;
+  f.dependencies.runRepository.update = async (...args) => {
+    if (rejectOnce) { rejectOnce = false; throw new Error('Simulated recovery checkpoint outage'); }
+    return originalUpdate(...args);
+  };
+  await assert.rejects(() => f.service.retryInfrastructureFailure(run.id), /checkpoint outage/);
+  const recovered = await f.service.retryInfrastructureFailure(run.id);
+  assert.equal(recovered.id, run.id);
+  assert.equal(recovered.projectId, failed.projectId);
+  assert.equal(recovered.state, 'paused');
+  assert.equal(recovered.fixAttempts, 0);
+  const project = await f.dependencies.projectRepository.get(failed.projectId);
+  assert.equal(project.archivedInfrastructureTasks.length, 1);
+  assert.equal(project.plan.phases.flatMap(p => p.tasks).filter(t => t.status === 'pending').length, 4);
+  assert.equal(project.runs.filter(r => r.status === 'failed').length, 2);
+  await assert.rejects(() => f.service.retryInfrastructureFailure(run.id), /idle failed run/);
+});
+
+test('infrastructure failure during a repair refunds the reservation and explicit resume retries the same repair', async t => {
+  let infrastructure = true;
+  let first = true;
+  const f = await fixture(t, { execute: task => {
+    if (first) { first = false; throw new Error('Application assertion failed'); }
+    if (task.isFix && infrastructure) {
+      const error = new Error('Codex exit 1');
+      error.executionResult = { stderr: 'Read-only file system' };
+      throw error;
+    }
+    return { success: true };
+  } });
+  const { run } = await f.service.start();
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.fixAttempts, 0);
+  const fixId = paused.activeFixTaskId;
+  infrastructure = false;
+  await f.service.resume(run.id);
+  const completed = await finish(f.service, run.id);
+  assert.equal(completed.state, 'completed');
+  assert.equal(completed.fixAttempts, 1);
+  assert.equal(f.calls.filter(id => id === fixId).length, 2);
+});
+
+test('legacy validator configuration failure refunds its repair and resumes validation on the same project', async t => {
+  let broken = true;
+  const f = await fixture(t, { execute: task => { if (task.isFix) throw new Error('Interrupted by restart'); return { success: true }; }, validate: () => broken ? { passed: false, checks: [{ name: 'install', passed: false, output: 'double-loading config' }] } : { passed: true } });
+  const analyze = f.service.failureAnalyzer.analyze.bind(f.service.failureAnalyzer);
+  f.service.failureAnalyzer.analyze = () => ({ recoverable: true, category: 'package-contract', recommendation: 'legacy', evidence: 'legacy' });
+  const { run } = await f.service.start();
+  const failed = await finish(f.service, run.id);
+  assert.equal(failed.state, 'failed');
+  f.service.failureAnalyzer.analyze = analyze;
+  await f.dependencies.runRepository.update(run.id, stored => {
+    stored.events.unshift({ type: 'fix_started', taskId: stored.activeFixTaskId, failure: { kind: 'task', taskId: 'obsolete-infrastructure-task' } });
+    return true;
+  });
+  const recovered = await f.service.retryInfrastructureFailure(run.id);
+  assert.equal(recovered.resumeState, 'testing');
+  assert.equal(recovered.fixAttempts, 0);
+  broken = false;
+  await f.service.resume(run.id);
+  assert.equal((await finish(f.service, run.id)).state, 'completed');
+  assert.equal(f.calls.length, 5);
+});

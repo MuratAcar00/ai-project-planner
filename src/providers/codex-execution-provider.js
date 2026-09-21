@@ -36,9 +36,10 @@ function buildTaskPrompt(task, context) {
 }
 
 class CodexExecutionProvider extends ExecutionProvider {
-  constructor({ spawnProcess = spawn, timeoutMs = process.env.CODEX_EXECUTION_TIMEOUT_MS, outputLimit = process.env.CODEX_EXECUTION_OUTPUT_LIMIT, minTimeoutMs = 1000, killGraceMs = 5000, streamCloseTimeoutMs = 1000 } = {}) {
+  constructor({ spawnProcess = spawn, timeoutMs = process.env.CODEX_EXECUTION_TIMEOUT_MS, outputLimit = process.env.CODEX_EXECUTION_OUTPUT_LIMIT, minTimeoutMs = 1000, killGraceMs = 5000, streamCloseTimeoutMs = 1000, isolatedRuntimeRoot = null } = {}) {
     super('codex');
     this.requiresWorkspace = true;
+    this.isolatedRuntimeRoot = isolatedRuntimeRoot;
     this.spawnProcess = spawnProcess;
     this.timeoutMs = configuredNumber(timeoutMs, DEFAULT_TIMEOUT_MS, { min: minTimeoutMs, max: MAX_TIMEOUT_MS });
     this.outputLimit = configuredNumber(outputLimit, DEFAULT_OUTPUT_LIMIT, { min: 1024, max: 1024 * 1024 });
@@ -74,14 +75,39 @@ class CodexExecutionProvider extends ExecutionProvider {
     // option of the `exec` subcommand. Keep it before `exec` so execution is
     // non-interactive without relying on an unsupported subcommand flag.
     const args = ['--ask-for-approval', 'never', 'exec', '--sandbox', 'workspace-write', '--cd', workspacePath, '--skip-git-repo-check', '--color', 'never', prompt];
-    return this.runCodex(args, { task, context: { ...context, workspacePath }, timeoutMs });
+    const invocation = await this.prepareInvocation(args, workspacePath);
+    return this.runCodex(invocation.args, { task, context: { ...context, workspacePath }, timeoutMs, command: invocation.command });
   }
 
-  runCodex(args, { task, context, timeoutMs }) {
+  async prepareInvocation(args, workspacePath) {
+    if (!this.isolatedRuntimeRoot) return { command: 'codex', args };
+    const root = this.isolatedRuntimeRoot;
+    if (!path.isAbsolute(root)) throw new Error('Codex runtime root must be absolute.');
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    if (await fs.realpath(root) !== root || (await fs.lstat(root)).isSymbolicLink()) throw new Error('Unsafe Codex runtime root.');
+    const runtime = await fs.mkdtemp(path.join(root, 'execution-'));
+    const codexHome = path.join(process.env.HOME, '.codex');
+    const mounts = [];
+    // Mount the existing account read-only; never copy, inspect or modify credentials.
+    for (const name of ['auth.json']) {
+      const source = path.join(codexHome, name);
+      try {
+        const info = await fs.lstat(source);
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error('Codex account must be a regular file.');
+        mounts.push('--ro-bind', source, path.join(codexHome, name));
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return { command: '/usr/bin/bwrap', args: ['--die-with-parent', '--new-session', '--ro-bind', '/', '/',
+      '--bind', runtime, codexHome, ...mounts, '--bind', workspacePath, workspacePath,
+      '--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev', '--chdir', workspacePath,
+      '--', 'codex', ...args.slice(0, 3), '--ignore-user-config', '--ignore-rules', ...args.slice(3)] };
+  }
+
+  runCodex(args, { task, context, timeoutMs, command = 'codex' }) {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = this.spawnProcess('codex', args, { cwd: context.workspacePath, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: this.safeEnvironment() });
+        child = this.spawnProcess(command, args, { cwd: context.workspacePath, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: this.safeEnvironment() });
       } catch (error) {
         reject(this.spawnError(error, task, context));
         return;

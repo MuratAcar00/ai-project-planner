@@ -144,3 +144,96 @@ Tests use Node’s built-in test runner and a temporary JSON data file, so they 
 - Editable/reorderable plan tasks and custom phases.
 - AI-provider integration as an optional planning engine.
 - Export plans to Markdown/PDF and project-management integrations.
+
+## Autonomous MVP orchestration
+
+The local autonomous API turns a template idea into a project, requirements, a dependency-ordered implementation plan, execution tasks, validation and bounded repair attempts. It does not start anything at server startup. This implementation has been tested with fake execution providers; no new SaaS was generated during this change.
+
+```text
+TemplateIdeaProvider → IdeaEvaluator → ProjectService / PlannerService
+                                             ↓
+                                AutonomousProjectService
+                                 ↙                  ↘
+                    ExecutionService           WorkspaceValidationService
+                    CodexExecutionProvider     isolated fixed validation commands
+                    WorkspaceService
+                                 ↓
+                     JsonAutonomousRunRepository
+                     state, decisions, events, validation evidence
+```
+
+`IdeaProvider` is the generation contract. `TemplateIdeaProvider` returns up to three small products with target user, problem, solution, features, monetization hypothesis, complexity and estimated task count. Monetization is a future option, not an implemented payment integration. `IdeaEvaluator` stores all eight feasibility criteria, weighted scores and the selection reason. Ideas needing paid APIs, external services, more than six tasks or complexity above three are ineligible. Score ties use idea ID for deterministic selection.
+
+The `autonomous` planner provider uses the existing `PlannerService` and `ProjectService`; manual template planning remains unchanged. Selected features become requirement items with acceptance criteria. Four sequential phases cover backend, dashboard, tests and documentation. Every task has dependencies and acceptance criteria. Autonomous project status becomes `Completed` only after validation, not merely after the last development task.
+
+### State, persistence and concurrency
+
+```text
+idle → generating_ideas → evaluating → planning → executing → testing → completed
+                                                    ↓           ↓
+                                                   fixing ← failure
+                                                    ↓
+                                           executing or testing
+
+Any active state → paused (explicit resume required)
+Unrecoverable error or exhausted repair budget → failed + needsAttention
+```
+
+Run state, idea evaluations, validation results, repair counters and timestamped events live in ignored `data/autonomous-runs.json`; projects stay in `data/projects.json`. The run repository reuses the serialized atomic JSON collection implementation. Run only **one server process and one repository/service instance per file**. This is not a distributed scheduler or a cross-process lock. Back up both data files together.
+
+One nonterminal autonomous run is allowed at a time, including paused runs. Concurrent start requests return the existing run with `duplicate: true`. An optional `requestId` also identifies a previous completed/failed run so retries do not create another product. Task execution always goes through the existing `ExecutionService`; there is no second Codex task runner. Manual mutation/execution/deletion endpoints reject orchestrator-owned projects with 409.
+
+Pause is cooperative: the current execution or validation operation may settle, but no new task/validation operation is admitted afterward. The stored state becomes `paused` immediately. Resume returns 409 while that operation is still settling. Phase output already in flight may still be persisted while paused. On process restart, interrupted executions are failed by `ExecutionService` and nonterminal autonomous runs become `paused`; **nothing is automatically relaunched**. Review processes/workspace before resume, especially after abrupt host termination. Parent run IDs reconcile project-creation crash windows; stable fix task IDs reconcile repair reservations. Completed tasks/fixes are not blindly repeated. A persistent storage failure stops the worker; recovery is required before further work.
+
+### API
+
+All control POST requests require `Content-Type: application/json`. Cross-origin control requests are denied. These are local operator endpoints, not a public authenticated multi-tenant API: do not expose them directly to the internet.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /api/autonomous/start` | 202 with `{run, duplicate}`; background work begins after persistence. |
+| `GET /api/autonomous/:id` | Current state, decisions, validation results and events; 404 if absent. |
+| `GET /api/autonomous/:id/events` | Ordered timestamped audit events. |
+| `POST /api/autonomous/:id/pause` | 202; stops admission of new work, without killing the current child. |
+| `POST /api/autonomous/:id/resume` | 202 after an explicit paused-run resume; 409 if still busy/not paused. |
+
+Start body is `{}` or, for example, `{"candidateCount":3,"requestId":"my-first-run"}`. Only these two fields are supported. Candidate count is 1–3 and request ID is 1–80 letters, digits, underscores or hyphens. Shell commands, workspace paths, raw Codex arguments, environment variables, provider choice, approval flags and fix limits are rejected. Pause/resume take `{}`. Invalid input is 400, unsupported content type 415, excessive body 413, forbidden origin 403.
+
+### Safety and operator approval
+
+`ApprovalGate` defaults external and unknown actions to **DENY**. There are no executors for git push, production deployment, domain purchase, paid product APIs, secret mutation, arbitrary credential use, destructive filesystem operations or writes outside a project workspace. Local generation/planning/code/test/fix actions are allowlisted. The autonomous endpoints cannot grant approvals.
+
+The installed Codex account is a credential-bearing capability. Consequently the default application will generate/evaluate/plan, then pause at `codex_execution` approval before invoking the real CLI. In the next explicitly authorized execution stage, trusted server composition can supply `new ApprovalGate({ allowCodexExecution: true })` to `createApp({ approvalGate })`. This authorizes only the existing Codex adapter/account; it does not authorize paid product APIs or any other external action. The flag is not accepted from HTTP. Unit tests instead inject a fake execution provider.
+
+Codex retains the checkpointed workspace-write sandbox, fixed arguments, prompt restrictions and bounded execution/output. An approval policy is not an OS sandbox: its action decisions are enforced at orchestration boundaries, while generated commands depend on the installed Codex sandbox. Do not place credentials in project workspaces or treat generated code as trusted. The existing manual task API remains a separate operator-directed interface.
+
+### Validation and failure repair
+
+The first autonomous product contract deliberately uses **zero dependencies, CommonJS, Node's HTTP server and a plain browser client**, with no transpiler/build system. Required package scripts are `start: node src/server.js` and `test: node --test test/*.test.js`; an optional `build: node --check src/server.js` is allowed. `src/app.js` must export an unlistened `createServer()` with `GET /api/health` returning `{status:"ok"}`. Unknown package scripts, package dependencies, dependency-bearing lockfiles, symlinks and sensitive/configuration filenames fail validation before execution. Inspection limits bound file count, individual size and directory depth.
+
+`WorkspaceValidationService` performs these fixed checks sequentially:
+
+1. Offline `npm install` with lifecycle scripts, audits and funding disabled; npm cache/config/home are isolated.
+2. `node --check` for every JavaScript source/client/test file (the syntax/build gate).
+3. `node --test` with the enumerated test files; at least one passing test is required. Empty/all-skipped suites cannot complete an MVP.
+4. Start `createServer()` on an ephemeral loopback port, make a real health request, and close it.
+
+Generated tests and startup code execute only through `SandboxValidationRunner`, using Linux **Bubblewrap** at `/usr/bin/bwrap`, system Node/npm at `/usr/bin`, user namespaces, read-only system runtime mounts and one writable project mount. The host home, environment and network are not exposed. No packages are downloaded. A fresh network namespace permits the internal loopback health request while preventing external access. Each command has a two-minute timeout and bounded captured output; the sandbox process is killed on timeout. This requires an operator-provisioned Linux host that permits user namespaces. Missing/denied sandbox infrastructure causes a safe pause, never an unsandboxed fallback. No OS package was installed by this change. Validation process behavior is covered using injected fake children/runners; a real sandbox deployment check remains for the next execution stage.
+
+Validation records contain check names, timestamps, exit status, output and error evidence. `FailureAnalyzer` classifies package-contract, syntax, test, startup and implementation errors; its advice and bounded evidence are audited. The failing check, rather than unrelated successful-check output, becomes repair context. A fix is an ordinary persisted task run by `ExecutionService`. After a task failure, a successful fix is followed by re-executing the original task before its dependents; after a validation failure, the entire validation sequence repeats. A failed fix execution stops for manual attention rather than running more product tasks.
+
+`MAX_FIX_ATTEMPTS` is an operator environment setting (default **3**, integer **0–10**). The selected value is persisted per run. It is a total repair budget across task and validation failures, survives restart, and cannot be supplied by API clients. Budget exhaustion produces `failed`, `needsAttention: true`, `project_failed` and a project status of `Needs attention`. Recognized missing execution/sandbox infrastructure pauses without consuming the code repair budget.
+
+### Audit and tests
+
+Events include `idea_generated`, `idea_selected`, `project_created`, `plan_created`, `task_started`, `task_completed`, `task_failed`, `validation_started`, `validation_failed`, `failure_analyzed`, `fix_started`, `validation_passed`, `project_completed`, `project_failed`, state transitions, approval decisions, pause/resume and recovery. Each has an ordered ID, UTC timestamp, autonomous run ID and project/task/execution-run/validation IDs where applicable. Full execution results remain in the existing project run history. Audit data is local runtime data and is not committed.
+
+`npm test` now discovers only `test/*.test.js`; generated workspace tests are intentionally excluded. Autonomous tests use temporary repositories/workspaces and fake execution/validation providers, never the real Codex CLI. New modules are `src/autonomous/state.js`, the idea/autonomous planner providers, `IdeaEvaluator`, `FailureAnalyzer`, `ApprovalGate`, `AutonomousProjectService`, `WorkspaceValidationService` and `JsonAutonomousRunRepository`. Test files are `test/autonomous.test.js`, `test/autonomous-api.test.js`, `test/autonomous-validation.test.js` and their isolated fixture helper.
+
+### Isolated Codex runtime and infrastructure recovery
+
+The default server now supplies a trusted `isolatedRuntimeRoot` under `.cache/codex-runtime` to the Codex adapter. Bubblewrap mounts the host read-only, the assigned project workspace writable, and a fresh private runtime directory over the child's `~/.codex`. The existing `auth.json` is mounted read-only without copying credentials. User config and exec rules are ignored for this invocation. CLI runtime/session writes therefore stay inside the repository; the real home is unchanged. Temporary files use a private `/tmp`. The inner Codex `workspace-write` sandbox and approval policy remain enabled. Bubblewrap and permitted user namespaces are required; no unsandboxed fallback is provided. The CLI's model connection still requires operator-authorized network access. Credentials requiring refresh cannot be rewritten through this mount.
+
+Execution stderr and process termination metadata now reach `FailureAnalyzer`. Recognized read-only filesystem, initialization, spawn and connection failures pause development with `needsAttention`, before a repair is reserved.
+
+After a successful real provider smoke test, a trusted operator may call `AutonomousProjectService.retryInfrastructureFailure(runId)`, then `resume(runId)`. Recovery is not exposed through HTTP. It accepts only an idle failed run whose failed tasks have infrastructure evidence. Original execution runs remain in audit history; obsolete infrastructure repair tasks are archived, their budget reservations refunded, and development tasks reset to pending. A persisted project receipt permits retry after a checkpoint write failure without double refunds. Application failures cannot use this recovery path.

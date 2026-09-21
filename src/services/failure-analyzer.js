@@ -1,7 +1,8 @@
 class FailureAnalyzer {
   analyze(failure) {
-    const message = String(failure.message || 'Unknown failure').slice(0, 3000);
-    const infrastructure = /CLI is not installed|sandbox unavailable|workspace.*not.*exist|state persistence failed/i.test(message);
+    const output = failure.output || {};
+    const message = [failure.message || 'Unknown failure', output.stderr || ''].join('\n').slice(0, 6000);
+    const infrastructure = ['spawn_error', 'process_error', 'stream_error'].includes(output.terminationReason) || /CLI is not installed|Unable to start Codex|sandbox unavailable|workspace.*not.*exist|state persistence failed|double-loading config|Exit prior to config file resolving|Read-only file system|EROFS|bwrap:|failed to connect to websocket|stream disconnected before completion|failed to initialize.*(?:app-server|sandbox)|(?:Codex|sandbox|runtime).*initialization fail|spawn.*(?:EACCES|EPERM|ENOENT)/i.test(message);
     let category = failure.kind === 'task' ? 'implementation' : 'validation';
     const check = failure.checkName || '';
     if (check === 'install' || check === 'contract') category = 'package-contract';

@@ -29,7 +29,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
   const planning = plannerService || new PlannerService({ providers: [new TemplatePlannerProvider(), new AutonomousPlannerProvider()] });
   const projectService = new ProjectService({ projectRepository: repository, plannerService: planning });
   const workspaces = workspaceService || new WorkspaceService();
-  const execution = executionService || new ExecutionService({ projectRepository: repository, workspaceService: workspaces, providers: [new TemplateExecutionProvider(), new CodexExecutionProvider()] });
+  const execution = executionService || new ExecutionService({ projectRepository: repository, workspaceService: workspaces, providers: [new TemplateExecutionProvider(), new CodexExecutionProvider({ isolatedRuntimeRoot: path.join(__dirname, '..', '.cache', 'codex-runtime') })] });
   const autonomous = autonomousService || new AutonomousProjectService({
     runRepository: autonomousRunRepository || new JsonAutonomousRunRepository(path.join(path.dirname(dataFile || repository.filePath || path.join(__dirname, '..', 'data', 'projects.json')), 'autonomous-runs.json')),
     projectRepository: repository, projectService, executionService: execution, workspaceService: workspaces,

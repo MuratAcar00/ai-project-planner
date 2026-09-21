@@ -119,3 +119,13 @@ test('all-skipped test suite cannot complete an MVP', async t => {
   const f = await validationFixture(t, () => ({ passed: true, output: '# tests 3\n# pass 0\n# skipped 3' }));
   assert.equal((await f.validation.validate({ projectId: 'validation-fixture' })).passed, false);
 });
+
+test('npm configuration paths are distinct and config initialization errors are infrastructure', async t => {
+  const f = await validationFixture(t, () => ({ passed: false, output: 'double-loading config "/dev/null" as "global", previously loaded as "user"' }));
+  const result = await f.validation.validate({ projectId: 'validation-fixture' });
+  assert.equal(result.infrastructureError, true);
+  const args = f.calls[0].args;
+  assert.ok(args.includes('--userconfig=/dev/null'));
+  assert.ok(args.includes('--globalconfig=/workspace/.validation/empty-global.npmrc'));
+  assert.equal(await fs.readFile(path.join(f.workspace, '.validation/empty-global.npmrc'), 'utf8'), '');
+});

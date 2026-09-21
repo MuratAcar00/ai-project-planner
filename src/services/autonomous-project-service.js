@@ -106,6 +106,60 @@ class AutonomousProjectService {
       return result;
     });
   }
+  // Trusted operator entry point. The caller must complete a real provider smoke test first.
+  // Persist a reconciliation receipt on the project so an interrupted retry is idempotent.
+  async retryInfrastructureFailure(id) {
+    await this.initialize();
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run || !['failed', 'paused'].includes(run.state) || (run.state === 'paused' && !run.pendingFailure) || this.jobs.has(id)) throw new Error('Infrastructure recovery requires an idle failed run or paused infrastructure checkpoint.');
+      const project = await this.projectRepository.get(run.projectId);
+      if (!project || project.autonomousRunId !== id) throw new Error('Recovery project ownership mismatch.');
+      if (allTasks(project).some(task => task.status === 'running')) throw new Error('Cannot recover active tasks.');
+      const validation = run.validationResults?.find(item => item.id === run.pendingFailure?.validationId);
+      const validationInfrastructure = validation && this.failureAnalyzer.analyze({ kind: 'validation', message: JSON.stringify(validation) }).category === 'infrastructure';
+      const failureKey = validationInfrastructure ? validation.id : run.completedAt;
+      const receipt = project.infrastructureRecovery;
+      let recovered = receipt?.runId === id && receipt.failedAt === failureKey ? receipt : null;
+      if (!recovered) {
+        const failed = allTasks(project).filter(task => task.status === 'failed');
+        if (!failed.length || failed.some(task => !(validationInfrastructure && task.isFix && task.id === run.activeFixTaskId) && this.failureAnalyzer.analyze({ kind: 'task', message: task.error, output: task.result }).category !== 'infrastructure')) {
+          throw new Error('Recovery requires infrastructure evidence for every failed task.');
+        }
+        // Only refund fixes that were created for an infrastructure failure as well.
+        const fixes = failed.filter(task => task.isFix);
+        for (const task of fixes) {
+          const reservation = [...run.events].reverse().find(item => item.type === 'fix_started' && item.taskId === task.id);
+          const original = failed.find(item => item.id === reservation?.failure?.taskId && !item.isFix);
+          if (!original && !(validationInfrastructure && reservation?.failure?.validationId === validation.id)) throw new Error('Cannot refund a repair of an application failure.');
+        }
+        recovered = { runId: id, failedAt: failureKey, resumeState: validationInfrastructure ? 'testing' : 'executing', taskIds: failed.map(task => task.id), refundedAttempts: fixes.length };
+        await this.projectRepository.update(project.id, stored => {
+          stored.infrastructureRecovery = recovered;
+          stored.archivedInfrastructureTasks ||= [];
+          for (const phase of stored.plan.phases) {
+            for (const task of phase.tasks.filter(task => recovered.taskIds.includes(task.id))) {
+              if (task.isFix) stored.archivedInfrastructureTasks.push(task);
+              else Object.assign(task, { status: 'pending', completed: false, error: null, result: null, startedAt: null, completedAt: null });
+            }
+            phase.tasks = phase.tasks.filter(task => !(task.isFix && recovered.taskIds.includes(task.id)));
+          }
+          stored.plan.phases = stored.plan.phases.filter(phase => phase.tasks.length);
+          stored.status = 'In progress';
+          return true;
+        });
+      }
+      return this.runRepository.update(id, stored => {
+        Object.assign(stored, { state: 'paused', resumeState: recovered.resumeState, needsAttention: false,
+          pauseReason: 'Infrastructure reconciled; ready for explicit resume.', error: null, completedAt: null, updatedAt: new Date().toISOString(),
+          pendingFailure: null, failureAnalysis: null, activeFixTaskId: null,
+          fixAttempts: Math.max(0, stored.fixAttempts - recovered.refundedAttempts) });
+        event(stored, 'infrastructure_recovered', recovered);
+        return true;
+      });
+    });
+  }
+
   async move(id, state, patch = {}, events = []) {
     return this.runRepository.update(id, run => {
       Object.assign(run, patch);
@@ -177,7 +231,7 @@ class AutonomousProjectService {
           const tasks = allTasks(project).filter(task => !task.isFix);
           const failed = tasks.find(task => task.status === 'failed');
           if (failed) {
-            await this.move(id, 'fixing', { pendingFailure: { kind: 'task', taskId: failed.id, message: failed.error || 'Interrupted task.' } });
+            await this.move(id, 'fixing', { pendingFailure: { kind: 'task', taskId: failed.id, message: failed.error || 'Interrupted task.', output: failed.result } });
             break;
           }
           if (tasks.length && tasks.every(task => task.completed)) { await this.move(id, 'testing'); break; }
@@ -185,7 +239,7 @@ class AutonomousProjectService {
           if (!task) throw new Error('No ready task: missing/cyclic dependency or unowned running execution.');
           const result = await this.execute(id, project, task);
           if (!result) return;
-          if (result.failed) await this.move(id, 'executing', { pendingFailure: { kind: 'task', taskId: task.id, message: result.error || 'Task failed.' } });
+          if (result.failed) await this.move(id, 'executing', { pendingFailure: { kind: 'task', taskId: task.id, message: result.error || 'Task failed.', output: result.output } });
           break;
         }
         case 'testing': {
@@ -224,7 +278,10 @@ class AutonomousProjectService {
           if (!run.failureAnalysis) {
             const failureAnalysis = this.failureAnalyzer.analyze(run.pendingFailure);
             await this.move(id, 'fixing', { failureAnalysis }, [['failure_analyzed', failureAnalysis]]);
-            if (!failureAnalysis.recoverable) { await this.pause(id, failureAnalysis.recommendation); return; }
+            if (!failureAnalysis.recoverable) {
+              await this.move(id, 'fixing', { needsAttention: true });
+              await this.pause(id, failureAnalysis.recommendation); return;
+            }
             break;
           }
           if (!run.failureAnalysis.recoverable) {
@@ -255,12 +312,29 @@ class AutonomousProjectService {
               return true;
             });
           }
+          if (run.fixReservationRefunded) {
+            await this.move(id, 'fixing', { fixAttempts: run.fixAttempts + 1, fixReservationRefunded: false, needsAttention: false });
+            break;
+          }
           // A completed fix is not rerun after a restart; only its next checkpoint is applied.
           if (task.status === 'failed') { await this.fail(id, 'Fix execution failed; manual review required.'); return; }
           if (!task.completed) {
             const result = await this.execute(id, project, task);
             if (!result) return;
-            if (result.failed) { await this.fail(id, 'Fix execution failed; manual review required.'); return; }
+            if (result.failed) {
+              const analysis = this.failureAnalyzer.analyze({ kind: 'task', message: result.error, output: result.output });
+              if (analysis.category === 'infrastructure') {
+                await this.projectRepository.update(project.id, stored => {
+                  const fix = allTasks(stored).find(item => item.id === task.id);
+                  Object.assign(fix, { status: 'pending', completed: false, error: null, result: null });
+                  return true;
+                });
+                await this.move(id, 'fixing', { fixAttempts: (await this.runRepository.get(id)).fixAttempts - 1, fixReservationRefunded: true, needsAttention: true }, [['failure_analyzed', analysis]]);
+                await this.pause(id, analysis.recommendation);
+                return;
+              }
+              await this.fail(id, 'Fix execution failed; manual review required.'); return;
+            }
           }
           if (run.pendingFailure.kind === 'task') {
             await this.projectRepository.update(project.id, stored => {
@@ -299,7 +373,7 @@ class AutonomousProjectService {
       event(run, failed ? 'task_failed' : 'task_completed', { taskId: task.id, executionRunId: accepted.run.id, ...(failed ? { reason: current.error || result?.error } : {}) });
       return true;
     });
-    return { failed, error: current.error || result?.error };
+    return { failed, error: current.error || result?.error, output: current.result };
   }
 }
 module.exports = { AutonomousProjectService, validateStart, fixLimit };

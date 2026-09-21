@@ -110,14 +110,20 @@ class WorkspaceValidationService {
       await fs.mkdir(target, { recursive: true });
       if ((await fs.lstat(target)).isSymbolicLink() || !(await fs.realpath(target)).startsWith(`${workspace}${path.sep}`)) throw new Error('Unsafe validation directory.');
     }
+    const emptyGlobal = path.join(workspace, '.validation', 'empty-global.npmrc');
+    try { await fs.writeFile(emptyGlobal, '', { flag: 'wx', mode: 0o600 }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    const globalInfo = await fs.lstat(emptyGlobal);
+    if (!globalInfo.isFile() || globalInfo.isSymbolicLink() || globalInfo.size !== 0) throw new Error('Unsafe validation npm configuration.');
     const commands = [
-      ['install', 'npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', '/workspace/.validation/npm-cache', '--userconfig=/dev/null', '--globalconfig=/dev/null']],
+      ['install', 'npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', '/workspace/.validation/npm-cache', '--userconfig=/dev/null', '--globalconfig=/workspace/.validation/empty-global.npmrc']],
       ...inspection.files.filter(file => /^(src|public|test)\/.*\.js$/.test(file)).map(file => [`syntax:${file}`, 'node', ['--check', file]]),
       ['tests', 'node', ['--test', ...inspection.testFiles]],
       ['startup-health', 'node', ['-e', HEALTH_SCRIPT]]
     ];
     for (const [name, command, args] of commands) {
       const result = await this.runner.run(workspace, command, args);
+      if (!result.passed && /double-loading config|Exit prior to config file resolving/i.test(result.output || '')) result.infrastructureError = true;
       const passedTests = Number((result.output || '').match(/^# pass (\d+)\s*$/m)?.[1] || 0);
       if (name === 'tests' && result.passed && !passedTests) {
         result.passed = false;
