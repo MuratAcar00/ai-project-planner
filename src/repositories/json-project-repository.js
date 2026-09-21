@@ -6,6 +6,7 @@ class JsonProjectRepository extends ProjectRepository {
   constructor(filePath) {
     super();
     this.filePath = filePath;
+    this.pending = Promise.resolve();
   }
 
   async init() {
@@ -25,13 +26,25 @@ class JsonProjectRepository extends ProjectRepository {
   }
 
   async write(projects) {
-    await fs.writeFile(this.filePath, JSON.stringify(projects, null, 2));
+    const temporary = `${this.filePath}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify(projects, null, 2));
+    await fs.rename(temporary, this.filePath);
   }
 
-  async list() { return this.read(); }
-  async get(id) { return (await this.read()).find(project => project.id === id) || null; }
+  serialize(operation) {
+    const result = this.pending.then(operation);
+    this.pending = result.catch(() => {});
+    return result;
+  }
+
+  async list() { return this.serialize(() => this.read()); }
+  async get(id) { return (await this.list()).find(project => project.id === id) || null; }
 
   async create(project) {
+    return this.serialize(() => this.createStored(project));
+  }
+
+  async createStored(project) {
     const projects = await this.read();
     projects.unshift(project);
     await this.write(projects);
@@ -39,6 +52,10 @@ class JsonProjectRepository extends ProjectRepository {
   }
 
   async update(id, updateFn) {
+    return this.serialize(() => this.updateStored(id, updateFn));
+  }
+
+  async updateStored(id, updateFn) {
     const projects = await this.read();
     const index = projects.findIndex(project => project.id === id);
     if (index < 0) return null;
@@ -49,6 +66,10 @@ class JsonProjectRepository extends ProjectRepository {
   }
 
   async delete(id) {
+    return this.serialize(() => this.deleteStored(id));
+  }
+
+  async deleteStored(id) {
     const projects = await this.read();
     const remaining = projects.filter(project => project.id !== id);
     if (remaining.length === projects.length) return false;

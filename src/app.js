@@ -4,9 +4,11 @@ const { JsonProjectRepository } = require('./repositories/json-project-repositor
 const { validateProjectInput, validateTaskUpdate } = require('./validation');
 const { TemplatePlannerProvider } = require('./providers/template-planner-provider');
 const { TemplateExecutionProvider } = require('./providers/template-execution-provider');
+const { CodexExecutionProvider } = require('./providers/codex-execution-provider');
 const { PlannerService } = require('./services/planner-service');
 const { ProjectService } = require('./services/project-service');
 const { ExecutionService, allTasks, updateProjectStatus } = require('./services/execution-service');
+const { WorkspaceService } = require('./services/workspace-service');
 
 const summary = project => {
   const tasks = project.plan.phases.flatMap(phase => phase.tasks);
@@ -14,12 +16,15 @@ const summary = project => {
   return { ...project, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0 };
 };
 
-function createApp({ dataFile, projectRepository, plannerService, executionService } = {}) {
+function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService } = {}) {
   const app = express();
   const repository = projectRepository || new JsonProjectRepository(dataFile || path.join(__dirname, '..', 'data', 'projects.json'));
   const planning = plannerService || new PlannerService({ providers: [new TemplatePlannerProvider()] });
   const projectService = new ProjectService({ projectRepository: repository, plannerService: planning });
-  const execution = executionService || new ExecutionService({ projectRepository: repository, providers: [new TemplateExecutionProvider()] });
+  const workspaces = workspaceService || new WorkspaceService();
+  const execution = executionService || new ExecutionService({ projectRepository: repository, workspaceService: workspaces, providers: [new TemplateExecutionProvider(), new CodexExecutionProvider()] });
+  const ready = execution.initialize();
+  app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
   app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
@@ -62,10 +67,9 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       if (!task) return res.status(404).json({ error: 'Task not found.' });
       const provider = req.body && req.body.provider;
       if (provider !== undefined && (typeof provider !== 'string' || !provider.trim() || provider.length > 50)) return res.status(400).json({ error: 'provider must be a non-empty string up to 50 characters.' });
-      const result = await execution.executeTask(project, task, { provider: provider || 'template' });
-      if (result.blocked) return res.status(409).json(result);
-      if (result.failed) return res.status(500).json(result);
-      res.status(201).json(result);
+      const result = await execution.startTask(project, task, { provider: provider || 'template' });
+      if (result.blocked || result.duplicate) return res.status(409).json(result);
+      res.status(202).json(result);
     } catch (e) {
       if (e.message === 'Project not found.' || e.message === 'Task not found.') return res.status(404).json({ error: e.message });
       if (e.message.startsWith('Unknown execution provider:')) return res.status(400).json({ error: e.message });

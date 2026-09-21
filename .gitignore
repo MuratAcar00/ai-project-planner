@@ -1,3 +1,16 @@
 node_modules/
 data/projects.json
 npm-debug.log*
+workspaces/
+data/*.json.tmp
+.npm-cache/
+.cache/
+.test-tmp/
+coverage/
+test-results/
+*.log
+.env
+.env.*
+secrets/
+*.pem
+*.key
