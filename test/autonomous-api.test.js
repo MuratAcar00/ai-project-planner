@@ -1,0 +1,54 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { createApp } = require('../src/app');
+const { fixture, finish, deferred } = require('./autonomous-helpers');
+
+async function serverFixture(t, options) {
+  const f = await fixture(t, options);
+  const server = createApp({ projectRepository: f.dependencies.projectRepository, executionService: f.dependencies.executionService,
+    workspaceService: f.dependencies.workspaceService, autonomousService: f.service }).listen(0, '127.0.0.1');
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const post = (url, body = {}, headers = {}) => fetch(base + url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  return { ...f, base, post };
+}
+
+test('autonomous API responds 202 while generation is pending, with duplicate and pause controls', async t => {
+  const entered = deferred(); const release = deferred();
+  const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
+  const f = await serverFixture(t, { ideaProvider: { async generateIdeas(config) { entered.resolve(); await release.promise; return new TemplateIdeaProvider().generateIdeas(config); } } });
+  t.after(() => release.resolve());
+  const response = await f.post('/api/autonomous/start', { requestId: 'api-run' });
+  assert.equal(response.status, 202);
+  const { run } = await response.json();
+  await entered.promise;
+  assert.equal(f.calls.length, 0);
+  assert.equal((await (await f.post('/api/autonomous/start', { requestId: 'api-run' })).json()).duplicate, true);
+  assert.equal((await f.post(`/api/autonomous/${run.id}/pause`)).status, 202);
+  assert.equal((await f.post(`/api/autonomous/${run.id}/resume`)).status, 409);
+  release.resolve(); await finish(f.service, run.id);
+  assert.equal((await (await fetch(`${f.base}/api/autonomous/${run.id}`)).json()).state, 'paused');
+  assert.equal((await f.post(`/api/autonomous/${run.id}/resume`)).status, 202);
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'completed');
+  const events = await (await fetch(`${f.base}/api/autonomous/${run.id}/events`)).json();
+  assert.ok(events.some(event => event.type === 'project_completed'));
+  const project = await f.dependencies.projectRepository.get(done.projectId);
+  const taskId = project.plan.phases[0].tasks[0].id;
+  assert.equal((await f.post(`/api/projects/${project.id}/tasks/${taskId}/run`)).status, 409);
+  assert.equal((await fetch(`${f.base}/api/projects/${project.id}/tasks/${taskId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{"completed":false}' })).status, 409);
+  assert.equal((await fetch(`${f.base}/api/projects/${project.id}`, { method: 'DELETE' })).status, 409);
+});
+
+test('autonomous API rejects shell/path/provider/approval input, cross-origin requests and malformed JSON', async t => {
+  const f = await serverFixture(t);
+  for (const body of [{ command: 'rm' }, { workspacePath: '/tmp' }, { provider: 'codex' }, { allowCodexExecution: true }, { maxFixAttempts: 100 }, [], null]) assert.equal((await f.post('/api/autonomous/start', body)).status, 400);
+  assert.equal((await f.post('/api/autonomous/start', {}, { Origin: 'https://untrusted.invalid' })).status, 403);
+  assert.equal((await fetch(`${f.base}/api/autonomous/start`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' })).status, 415);
+  assert.equal((await fetch(`${f.base}/api/autonomous/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' })).status, 400);
+  assert.equal((await fetch(`${f.base}/api/autonomous/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: 'a'.repeat(110000) }) })).status, 413);
+  for (const suffix of ['', '/events']) assert.equal((await fetch(`${f.base}/api/autonomous/missing${suffix}`)).status, 404);
+  for (const action of ['pause', 'resume']) assert.equal((await f.post(`/api/autonomous/missing/${action}`)).status, 404);
+  assert.equal((await f.dependencies.runRepository.list()).length, 0);
+});

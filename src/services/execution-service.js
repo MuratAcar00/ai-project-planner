@@ -3,7 +3,7 @@ const { createRun, startRun, completeRun, failRun } = require('../domain');
 const allTasks = project => project.plan.phases.flatMap(phase => phase.tasks);
 const updateProjectStatus = project => {
   const tasks = allTasks(project);
-  project.status = tasks.length && tasks.every(task => task.completed) ? 'Completed' : 'In progress';
+  project.status = !project.autonomousRunId && tasks.length && tasks.every(task => task.completed) ? 'Completed' : 'In progress';
 };
 
 class ExecutionService {

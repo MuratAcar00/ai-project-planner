@@ -6,12 +6,12 @@ class ProjectService {
     this.plannerService = plannerService;
   }
 
-  async createProject(input) {
+  async createProject(input, { provider = 'template', requirementItems = [] } = {}) {
     const projectId = makeId('project');
     let run = startRun(createRun({ projectId, type: 'plan-generation' }));
 
     try {
-      const generated = await this.plannerService.generatePlan(input);
+      const generated = await this.plannerService.generatePlan(input, { provider });
       const plan = createPlan({
         ...generated.plan,
         id: makeId('plan'),
@@ -19,7 +19,9 @@ class ProjectService {
         generatedAt: new Date().toISOString()
       });
       run = completeRun(run, { provider: generated.provider, planId: plan.id });
-      return this.projectRepository.create(createProject({ id: projectId, input, plan, run }));
+      const project = createProject({ id: projectId, input, plan, run });
+      project.requirements.items = requirementItems;
+      return this.projectRepository.create(project);
     } catch (error) {
       run = failRun(run, { message: error.message });
       throw error;
