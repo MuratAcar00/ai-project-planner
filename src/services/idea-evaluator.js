@@ -1,3 +1,4 @@
+const { IdeaNoveltyService } = require('./idea-novelty-service');
 class IdeaEvaluator {
   evaluate(idea) {
     const rating = value => Number.isInteger(value) && value >= 1 && value <= 5;
@@ -18,12 +19,19 @@ class IdeaEvaluator {
     return { ideaId: idea.id, eligible, score: Object.values(criteria).reduce((sum, value) => sum + value, 0), criteria,
       reason: eligible ? 'Small, testable MVP with no external services or paid APIs; ranked by weighted feasibility.' : 'Excluded: exceeds local MVP scope or needs external/paid services.' };
   }
-  select(ideas) {
+  select(ideas, history = []) {
     if (!Array.isArray(ideas) || !ideas.length || ideas.length > 3) throw new Error('Expected 1–3 candidate ideas.');
-    const evaluations = ideas.map(idea => this.evaluate(idea));
+    const novelty = new IdeaNoveltyService();
+    const evaluations = ideas.map(idea => {
+      const evaluation = this.evaluate(idea);
+      const check = novelty.check(idea, history);
+      return { ...evaluation, eligible: evaluation.eligible && !check.duplicate, duplicate: check.duplicate,
+        score: evaluation.score + check.novelty + check.diversity,
+        criteria: { ...evaluation.criteria, novelty: check.novelty, diversity: check.diversity } };
+    });
     const ranked = evaluations.filter(item => item.eligible).sort((a, b) => b.score - a.score || a.ideaId.localeCompare(b.ideaId));
-    if (!ranked.length) throw new Error('No eligible MVP idea.');
-    return { evaluations, selected: ideas.find(idea => idea.id === ranked[0].ideaId), reason: `${ranked[0].reason} Score ${ranked[0].score}/100; ties use idea ID.` };
+    if (!ranked.length) return { evaluations, selected: null, reason: 'No unique eligible MVP idea.' };
+    return { evaluations, selected: ideas.find(idea => idea.id === ranked[0].ideaId), reason: `${ranked[0].reason} Score ${ranked[0].score}/116; ties use idea ID.` };
   }
 }
 module.exports = { IdeaEvaluator };

@@ -1,6 +1,6 @@
 const transitions = {
-  idle: ['generating_ideas'], generating_ideas: ['evaluating'], evaluating: ['planning'],
-  planning: ['executing'], executing: ['testing', 'fixing'], testing: ['fixing', 'completed'],
+  idle: ['generating_ideas'], generating_ideas: ['evaluating'], evaluating: ['planning', 'generating_ideas'],
+  planning: ['executing', 'generating_ideas'], executing: ['testing', 'fixing'], testing: ['fixing', 'completed'],
   fixing: ['executing', 'testing'], paused: [], completed: [], failed: []
 };
 function transition(run, state) {

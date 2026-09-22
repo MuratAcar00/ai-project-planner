@@ -1,3 +1,4 @@
+const { IdeaNoveltyService } = require('./idea-novelty-service');
 const { makeId, createTask, createPhase } = require('../domain');
 const { allTasks } = require('./execution-service');
 const { transition, event } = require('../autonomous/state');
@@ -19,10 +20,13 @@ function validateStart(input = {}) {
 
 class AutonomousProjectService {
   constructor({ runRepository, projectRepository, projectService, executionService, workspaceService,
-    ideaProvider, ideaEvaluator, validationService, approvalGate, executionProvider = 'codex', maxFixAttempts, failureAnalyzer = new FailureAnalyzer() }) {
+    ideaProvider, ideaEvaluator, validationService, approvalGate, executionProvider = 'codex', maxFixAttempts, maxIdeaBatches = Number(process.env.MAX_IDEA_BATCHES ?? 4), failureAnalyzer = new FailureAnalyzer() }) {
     Object.assign(this, { runRepository, projectRepository, projectService, executionService, workspaceService,
       ideaProvider, ideaEvaluator, validationService, approvalGate, executionProvider, failureAnalyzer });
     this.maxFixAttempts = fixLimit(maxFixAttempts);
+    if (!Number.isInteger(maxIdeaBatches) || maxIdeaBatches < 1 || maxIdeaBatches > 10) throw new Error('MAX_IDEA_BATCHES must be between 1 and 10.');
+    this.maxIdeaBatches = maxIdeaBatches;
+    this.novelty = new IdeaNoveltyService();
     this.jobs = new Map();
     this.control = Promise.resolve();
     this.initialization = null;
@@ -200,28 +204,53 @@ class AutonomousProjectService {
           break;
         case 'generating_ideas': {
           if (!await this.permitted(id, 'generate_ideas')) return;
-          const ideas = await this.ideaProvider.generateIdeas(run.config);
+          if ((run.ideaBatch || 0) >= this.maxIdeaBatches) {
+            await this.runRepository.update(id, stored => { stored.needsAttention = true; return true; });
+            await this.pause(id, 'No unique eligible idea found within the candidate batch limit.');
+            return;
+          }
+          const ideaBatch = (run.ideaBatch || 0) + 1;
+          const history = await this.novelty.history(this.projectRepository, this.runRepository, id);
+          const ideas = await this.ideaProvider.generateIdeas({ ...run.config, batch: ideaBatch, history });
+          await this.runRepository.update(id, stored => { stored.ideaBatch = ideaBatch; return true; });
           await this.move(id, 'evaluating', { ideas }, ideas.map(idea => ['idea_generated', { ideaId: idea.id }]));
           break;
         }
         case 'evaluating': {
-          const selection = this.ideaEvaluator.select(run.ideas);
+          await this.move(id, 'evaluating', {}, [['checking_history', {}]]);
+          const history = await this.novelty.history(this.projectRepository, this.runRepository, id);
+          const selection = this.ideaEvaluator.select(run.ideas, history);
+          await this.move(id, 'evaluating', {}, [['evaluating_candidates', {}], ...selection.evaluations.filter(item => item.duplicate)
+            .map(item => ['rejected_as_duplicate', { ideaName: run.ideas.find(idea => idea.id === item.ideaId)?.name }])]);
+          if (!selection.selected) {
+            await this.move(id, 'generating_ideas', { selection: null });
+            break;
+          }
+          await this.move(id, 'evaluating', {}, [['selecting_idea', {}]]);
           await this.move(id, 'planning', { selection }, [['idea_selected', { ideaId: selection.selected.id, reason: selection.reason, evaluations: selection.evaluations }]]);
           break;
         }
         case 'planning': {
           if (!await this.permitted(id, 'plan_project')) return;
-          // Reconcile the create/link crash window using the stable parent run ID.
-          let project = (await this.projectRepository.list()).find(project => project.autonomousRunId === id);
-          if (!project) {
-            const idea = run.selection.selected;
-            project = await this.projectService.createProject({ name: idea.name,
-              description: `${idea.oneLinePitch} Users: ${idea.targetUser}. Problem: ${idea.problem} Solution: ${idea.solution} Features: ${idea.coreFeatures.join('; ')}.`,
-              platform: 'Web', technology: 'JavaScript', experienceLevel: 'Advanced', autonomousRunId: id, idea },
-            { provider: 'autonomous', requirementItems: idea.coreFeatures.map((text, index) => ({ id: `requirement-${index + 1}`, text, acceptanceCriteria: `User can ${text.toLowerCase()}.` })) });
-          }
-          await this.workspaceService.getWorkspacePath(project.id);
-          await this.move(id, 'executing', { projectId: project.id }, [['project_created', { projectId: project.id }], ['plan_created', { planId: project.plan.id }]]);
+          await this.serialize(async () => {
+            if ((await this.runRepository.get(id)).state === 'paused') return;
+            // Reconcile the create/link crash window using the stable parent run ID.
+            let project = (await this.projectRepository.list()).find(project => project.autonomousRunId === id);
+            if (!project) {
+              const idea = run.selection.selected;
+              const history = await this.novelty.history(this.projectRepository, this.runRepository, id);
+              if (this.novelty.check(idea, history).duplicate) {
+                await this.move(id, 'generating_ideas', { selection: null }, [['rejected_as_duplicate', { ideaName: idea.name }]]);
+                return;
+              }
+              project = await this.projectService.createProject({ name: idea.name,
+                description: `${idea.oneLinePitch} Users: ${idea.targetUser}. Problem: ${idea.problem} Solution: ${idea.solution} Features: ${idea.coreFeatures.join('; ')}.`,
+                platform: 'Web', technology: 'JavaScript', experienceLevel: 'Advanced', autonomousRunId: id, idea },
+              { provider: 'autonomous', requirementItems: idea.coreFeatures.map((text, index) => ({ id: `requirement-${index + 1}`, text, acceptanceCriteria: `User can ${text.toLowerCase()}.` })) });
+            }
+            await this.workspaceService.getWorkspacePath(project.id);
+            await this.move(id, 'executing', { projectId: project.id }, [['project_created', { projectId: project.id }], ['plan_created', { planId: project.plan.id }]]);
+          });
           break;
         }
         case 'executing': {

@@ -1,6 +1,56 @@
-# AI Project Planner
+# Autonomous App Factory
 
-AI Project Planner turns a software idea into a structured, actionable development plan. It is a fully local Express application: plans are generated deterministically from practical templates, and projects persist in a JSON file—no external AI service or database is required.
+Autonomous App Factory is a local control panel for generating, planning, building, testing and running small SaaS applications. The existing manual project planner remains available under **Manual project planning**. The autonomous pipeline uses the existing providers and orchestrator; the browser only starts, observes and pauses/resumes real persisted runs.
+
+## Factory quick start
+
+```bash
+npm install
+npm start
+```
+
+Open **http://localhost:3000**. `PORT` keeps its existing behavior. Linux Bubblewrap (`/usr/bin/bwrap`), permitted user namespaces and system Node (`/usr/bin/node`) are required for validation and generated app runtime. Codex CLI and an operator-configured account are additionally required for real code generation. No OS package installation or dependency download happens when starting a generated app.
+
+By default real Codex execution still requires operator authorization: generation/evaluation/planning can proceed, then the run pauses at the approval gate. To authorize the installed Codex account when starting the Factory, explicitly use:
+
+```bash
+FACTORY_ALLOW_CODEX_EXECUTION=true npm start
+```
+
+This trusted server setting cannot be supplied by the browser. It does not authorize deployment, paid product integrations or other external actions. This dashboard integration did not launch any new Codex generation.
+
+1. Click **Generate & Build SaaS**; no idea entry is needed. The local idea provider proposes domain-specific candidates and checks prior projects before selection.
+2. Follow the run ID, current stage/task, task progress, fix count and creation time on the dashboard. A session request ID, disabled in-flight button and backend single-flight protection prevent accidental duplicate runs. Persistent runs are rediscovered through `GET /api/autonomous` after refresh.
+3. Open **View Progress** for timestamped event messages. Polling runs every 2.5 seconds and retries status failures.
+4. **Pause** stops admitting new work after the current operation settles. **Resume** is available for ordinary paused runs. Failed or **Needs Attention** runs require trusted operator review; infrastructure recovery is never exposed in the browser. Resume may briefly return 409 while the current operation settles.
+5. On a completed autonomous project, use **Start App**, then **Open App**, and **Stop App** when finished. Open App uses the URL returned by the backend. Closing a browser tab does not stop the app.
+
+Lifecycle: generating ideas → evaluating → planning → building → testing → fixing (when needed, within the persisted repair budget) → completed. Paused and failed states remain visible. Progress is completed tasks / total tasks, not an estimate of remaining validation time; it can reach 100% while testing is still running.
+
+## Generated app runtime and security
+
+`GeneratedAppRuntimeService` resolves project ownership against its autonomous run and permits startup only when both are completed. Workspace resolution uses the configured `WorkspaceService` root plus the validated project ID. Symlinked roots/workspaces, traversal, unsafe package scripts and unsupported dependency configurations are rejected. No command, path, port, PID, environment or other runtime configuration is accepted in requests; start/stop require `{}` and JSON, retain same-origin checks, and runtime endpoints additionally require a loopback peer and localhost Host header.
+
+The fixed package contract is `start: node src/server.js`, CommonJS and zero dependencies, with the existing validation contract also checked before startup. The service deliberately does not execute npm scripts. It uses the validated `src/app.js` `createServer()` export through a fixed Node launcher so existing apps with a hardcoded server port (including Decision Log) remain compatible without workspace edits.
+
+The generated child runs with `spawn(..., {shell:false})` inside Bubblewrap: isolated network/PID namespaces, read-only system runtime, writable assigned workspace and private runtime directory, temporary `/tmp`, no host home or inherited credentials. The launcher listens on a private Unix socket. A backend HTTP proxy binds **127.0.0.1, port 0** and keeps that socket reserved for the entire runtime lifetime. This eliminates the port selection/rebind race and avoids the Factory port. Multiple completed apps receive distinct allocated ports. The generated process has no external network access. Readiness checks `/api/health`, falling back to `/` only on 404; failure terminates the owned child and closes the proxy.
+
+The in-memory registry records project ID, child PID, allocated port, start time and status. Stop uses the stored child object, never a client PID. Unexpected child exit removes runtime state. SIGINT/SIGTERM shut down owned runtimes; Bubblewrap's parent-death behavior terminates sandbox children after abrupt Factory exit. On restart the registry is empty; no persisted PID is killed and no app is relaunched. Private cache directories may remain after abrupt termination. App data stays in its assigned workspace.
+
+Browser run/status/event responses use explicit safe projections without raw prompts, Codex stdout/stderr or validation evidence. Autonomous projects accessed through the legacy project endpoints also omit execution evidence. Manual project behavior remains unchanged. This is a local operator application, not an authenticated public hosting platform; keep the Factory private.
+
+| Endpoint | Response / action |
+| --- | --- |
+| `GET /api/autonomous` | Safe persisted run summaries for dashboard discovery. |
+| `GET /api/autonomous/:id` | Safe run summary with task progress and controls. |
+| `GET /api/autonomous/:id/events` | Timestamped, readable event messages without raw execution data. |
+| `POST /api/projects/:id/runtime/start` | Start a completed autonomous app and return its ready localhost URL. |
+| `POST /api/projects/:id/runtime/stop` | Stop only the child/proxy owned by this Factory process. |
+| `GET /api/projects/:id/runtime` | In-memory runtime status; URL only when ready. |
+
+Existing autonomous start/pause/resume endpoints are unchanged in purpose; their run responses now use safe summaries. Full audit evidence remains in local persistence for trusted operator inspection.
+
+Current limitations: single Factory process per data store; one nonterminal autonomous build at a time; zero-dependency CommonJS `createServer()` apps only; HTTP proxy without WebSocket upgrades; no CPU/memory quota or production supervision; local Linux runtime only. Do not edit or replace workspaces concurrently with runtime startup. The sandbox restricts generated code but is not a general hostile-code hosting service.
 
 ## Features
 
@@ -147,10 +197,10 @@ Tests use Node’s built-in test runner and a temporary JSON data file, so they 
 
 ## Autonomous MVP orchestration
 
-The local autonomous API turns a template idea into a project, requirements, a dependency-ordered implementation plan, execution tasks, validation and bounded repair attempts. It does not start anything at server startup. This implementation has been tested with fake execution providers; no new SaaS was generated during this change.
+The local autonomous API turns a locally generated, history-checked idea into a project, requirements, a dependency-ordered implementation plan, execution tasks, validation and bounded repair attempts. It does not start anything at server startup. The pipeline has completed the existing Decision Log project; dashboard integration tests use fake execution providers and start only existing/fixture apps.
 
 ```text
-TemplateIdeaProvider → IdeaEvaluator → ProjectService / PlannerService
+LocalIdeaProvider → IdeaNoveltyService / IdeaEvaluator → duplicate gate → ProjectService / PlannerService
                                              ↓
                                 AutonomousProjectService
                                  ↙                  ↘
@@ -162,7 +212,15 @@ TemplateIdeaProvider → IdeaEvaluator → ProjectService / PlannerService
                      state, decisions, events, validation evidence
 ```
 
-`IdeaProvider` is the generation contract. `TemplateIdeaProvider` returns up to three small products with target user, problem, solution, features, monetization hypothesis, complexity and estimated task count. Monetization is a future option, not an implemented payment integration. `IdeaEvaluator` stores all eight feasibility criteria, weighted scores and the selection reason. Ideas needing paid APIs, external services, more than six tasks or complexity above three are ineligible. Score ties use idea ID for deterministic selection.
+`IdeaProvider` remains injectable; tests can use `TemplateIdeaProvider` or a fake provider. Production uses `LocalIdeaProvider`: twelve curated problem/audience/workflow recipes across developer tools, education, business operations, content, analytics and other domains. A randomized rotation and history-based domain ordering produce bounded candidate batches without network calls, paid APIs or recursive Codex invocation. Candidates include domain, stable problem identity, target user, problem, core workflow, MVP features, differentiators, complexity and business model. The catalog is deliberately finite and extensible; it does not disguise a used problem with a new name.
+
+`IdeaNoveltyService` reads all project records and selected run ideas, including completed, active, paused and failed work. Linked projects/runs count once; old records need no migration. Unicode accents, casing and punctuation are normalized. Exact normalized names and stable problem identities are rejected. Token overlap (Dice coefficient after stop-word removal and simple suffix normalization) compares problem, target audience and workflow/features: problem ≥ 0.8, problem/workflow both ≥ 0.5, or workflow ≥ 0.8 with audience ≥ 0.5 rejects a candidate. This is a conservative local lexical heuristic, not a semantic model; arbitrary paraphrases and translations may escape it.
+
+`IdeaEvaluator` retains all eight feasibility criteria and adds novelty (10 points for a unique idea) and diversity (up to 6 points, reduced by previous domain usage). Duplicates are ineligible regardless of score. Paid APIs, external services, more than six tasks or complexity above three remain ineligible. Ties use idea ID. `MAX_IDEA_BATCHES` defaults to 4 (operator-only integer 1–10); exhaustion pauses with Needs Attention before project creation. Duplicate events (`rejected_as_duplicate`) expose only readable candidate names through the timeline, never similarity internals. Checking history, evaluating candidates and selecting an idea also have timeline entries.
+
+Immediately before creating a project, the service rereads history and checks novelty under the same admission lock used for start/pause. Concurrent HTTP starts share one nonterminal run; project creation and its link checkpoint are serialized. Recovery reconciles an existing project by its run ID. This guarantee assumes the documented single Factory process/service per store; JSON persistence is not a distributed lock. Existing completed duplicates remain intact.
+
+Read-only production selection smoke test: `node scripts/smoke-idea-selection.js`. It reads existing JSON history without initializing any repositories or executors, uses a fixed production-provider rotation that includes Decision Log, and reports candidates, rejections and selection. It never creates a project or invokes Codex.
 
 The `autonomous` planner provider uses the existing `PlannerService` and `ProjectService`; manual template planning remains unchanged. Selected features become requirement items with acceptance criteria. Four sequential phases cover backend, dashboard, tests and documentation. Every task has dependencies and acceptance criteria. Autonomous project status becomes `Completed` only after validation, not merely after the last development task.
 
@@ -192,8 +250,8 @@ All control POST requests require `Content-Type: application/json`. Cross-origin
 | Endpoint | Behavior |
 | --- | --- |
 | `POST /api/autonomous/start` | 202 with `{run, duplicate}`; background work begins after persistence. |
-| `GET /api/autonomous/:id` | Current state, decisions, validation results and events; 404 if absent. |
-| `GET /api/autonomous/:id/events` | Ordered timestamped audit events. |
+| `GET /api/autonomous/:id` | Safe run state and progress summary; 404 if absent. |
+| `GET /api/autonomous/:id/events` | Ordered timestamped readable events with raw evidence omitted. |
 | `POST /api/autonomous/:id/pause` | 202; stops admission of new work, without killing the current child. |
 | `POST /api/autonomous/:id/resume` | 202 after an explicit paused-run resume; 409 if still busy/not paused. |
 
@@ -203,7 +261,7 @@ Start body is `{}` or, for example, `{"candidateCount":3,"requestId":"my-first-r
 
 `ApprovalGate` defaults external and unknown actions to **DENY**. There are no executors for git push, production deployment, domain purchase, paid product APIs, secret mutation, arbitrary credential use, destructive filesystem operations or writes outside a project workspace. Local generation/planning/code/test/fix actions are allowlisted. The autonomous endpoints cannot grant approvals.
 
-The installed Codex account is a credential-bearing capability. Consequently the default application will generate/evaluate/plan, then pause at `codex_execution` approval before invoking the real CLI. In the next explicitly authorized execution stage, trusted server composition can supply `new ApprovalGate({ allowCodexExecution: true })` to `createApp({ approvalGate })`. This authorizes only the existing Codex adapter/account; it does not authorize paid product APIs or any other external action. The flag is not accepted from HTTP. Unit tests instead inject a fake execution provider.
+The installed Codex account is a credential-bearing capability. Consequently the default application will generate/evaluate/plan, then pause at `codex_execution` approval before invoking the real CLI. Trusted server composition can supply `new ApprovalGate({ allowCodexExecution: true })` to `createApp({ approvalGate })`. This authorizes only the existing Codex adapter/account; it does not authorize paid product APIs or any other external action. The flag is not accepted from HTTP. Unit tests instead inject a fake execution provider.
 
 Codex retains the checkpointed workspace-write sandbox, fixed arguments, prompt restrictions and bounded execution/output. An approval policy is not an OS sandbox: its action decisions are enforced at orchestration boundaries, while generated commands depend on the installed Codex sandbox. Do not place credentials in project workspaces or treat generated code as trusted. The existing manual task API remains a separate operator-directed interface.
 
@@ -218,7 +276,7 @@ The first autonomous product contract deliberately uses **zero dependencies, Com
 3. `node --test` with the enumerated test files; at least one passing test is required. Empty/all-skipped suites cannot complete an MVP.
 4. Start `createServer()` on an ephemeral loopback port, make a real health request, and close it.
 
-Generated tests and startup code execute only through `SandboxValidationRunner`, using Linux **Bubblewrap** at `/usr/bin/bwrap`, system Node/npm at `/usr/bin`, user namespaces, read-only system runtime mounts and one writable project mount. The host home, environment and network are not exposed. No packages are downloaded. A fresh network namespace permits the internal loopback health request while preventing external access. Each command has a two-minute timeout and bounded captured output; the sandbox process is killed on timeout. This requires an operator-provisioned Linux host that permits user namespaces. Missing/denied sandbox infrastructure causes a safe pause, never an unsandboxed fallback. No OS package was installed by this change. Validation process behavior is covered using injected fake children/runners; a real sandbox deployment check remains for the next execution stage.
+Generated tests and startup code execute only through `SandboxValidationRunner`, using Linux **Bubblewrap** at `/usr/bin/bwrap`, system Node/npm at `/usr/bin`, user namespaces, read-only system runtime mounts and one writable project mount. The host home, environment and network are not exposed. No packages are downloaded. A fresh network namespace permits the internal loopback health request while preventing external access. Each command has a two-minute timeout and bounded captured output; the sandbox process is killed on timeout. This requires an operator-provisioned Linux host that permits user namespaces. Missing/denied sandbox infrastructure causes a safe pause, never an unsandboxed fallback. No OS package was installed by this change. Validation process behavior is covered using injected fake children/runners; runtime integration tests additionally exercise real Bubblewrap startup on a supported host.
 
 Validation records contain check names, timestamps, exit status, output and error evidence. `FailureAnalyzer` classifies package-contract, syntax, test, startup and implementation errors; its advice and bounded evidence are audited. The failing check, rather than unrelated successful-check output, becomes repair context. A fix is an ordinary persisted task run by `ExecutionService`. After a task failure, a successful fix is followed by re-executing the original task before its dependents; after a validation failure, the entire validation sequence repeats. A failed fix execution stops for manual attention rather than running more product tasks.
 

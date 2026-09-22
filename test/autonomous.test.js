@@ -18,16 +18,16 @@ test('idea provider produces multiple complete independent candidates', async ()
   await assert.rejects(() => provider.generateIdeas({ candidateCount: 20 }));
 });
 
-test('evaluation scores all eight criteria, excludes paid/external ideas and breaks ties deterministically', async () => {
+test('evaluation scores feasibility plus novelty and diversity criteria, excludes paid/external ideas and breaks ties deterministically', async () => {
   const evaluator = new IdeaEvaluator();
   const ideas = await new TemplateIdeaProvider().generateIdeas();
   const result = evaluator.select(ideas);
-  assert.equal(result.evaluations[0].score <= 100, true);
-  assert.equal(Object.keys(result.evaluations[0].criteria).length, 8);
+  assert.equal(result.evaluations[0].score <= 116, true);
+  assert.equal(Object.keys(result.evaluations[0].criteria).length, 10);
   assert.deepEqual(evaluator.select(ideas).selected, result.selected);
   assert.equal(evaluator.evaluate({ ...ideas[0], paidApiRequired: true }).eligible, false);
   assert.equal(evaluator.evaluate({ ...ideas[0], externalDependencies: ['payment'] }).eligible, false);
-  assert.throws(() => evaluator.select([{ ...ideas[0], complexity: 5 }]));
+  assert.equal(evaluator.select([{ ...ideas[0], complexity: 5 }]).selected, null);
   assert.throws(() => evaluator.evaluate({ ...ideas[0], usefulness: 99 }));
 });
 

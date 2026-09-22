@@ -1,4 +1,6 @@
 const express = require('express');
+const { GeneratedAppRuntimeService } = require('./services/generated-app-runtime-service');
+const { runSummary, eventSummary } = require('./autonomous/presentation');
 const path = require('node:path');
 const { JsonProjectRepository } = require('./repositories/json-project-repository');
 const { validateProjectInput, validateTaskUpdate } = require('./validation');
@@ -10,7 +12,7 @@ const { ProjectService } = require('./services/project-service');
 const { ExecutionService, allTasks, updateProjectStatus } = require('./services/execution-service');
 const { WorkspaceService } = require('./services/workspace-service');
 const { AutonomousPlannerProvider } = require('./providers/autonomous-planner-provider');
-const { TemplateIdeaProvider } = require('./providers/template-idea-provider');
+const { LocalIdeaProvider } = require('./providers/local-idea-provider');
 const { IdeaEvaluator } = require('./services/idea-evaluator');
 const { ApprovalGate } = require('./services/approval-gate');
 const { WorkspaceValidationService } = require('./services/workspace-validation-service');
@@ -20,10 +22,11 @@ const { JsonAutonomousRunRepository } = require('./repositories/json-autonomous-
 const summary = project => {
   const tasks = project.plan.phases.flatMap(phase => phase.tasks);
   const completedTasks = tasks.filter(task => task.completed).length;
+  if (project.autonomousRunId) return { id: project.id, name: project.name, autonomousRunId: project.autonomousRunId, status: project.status, createdAt: project.createdAt, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round(completedTasks / tasks.length * 100) : 0 };
   return { ...project, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0 };
 };
 
-function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate } = {}) {
+function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate, runtimeService } = {}) {
   const app = express();
   const repository = projectRepository || new JsonProjectRepository(dataFile || path.join(__dirname, '..', 'data', 'projects.json'));
   const planning = plannerService || new PlannerService({ providers: [new TemplatePlannerProvider(), new AutonomousPlannerProvider()] });
@@ -33,15 +36,18 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
   const autonomous = autonomousService || new AutonomousProjectService({
     runRepository: autonomousRunRepository || new JsonAutonomousRunRepository(path.join(path.dirname(dataFile || repository.filePath || path.join(__dirname, '..', 'data', 'projects.json')), 'autonomous-runs.json')),
     projectRepository: repository, projectService, executionService: execution, workspaceService: workspaces,
-    ideaProvider: new TemplateIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
+    ideaProvider: new LocalIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
     validationService: new WorkspaceValidationService({ workspaceService: workspaces }), approvalGate: approvalGate || new ApprovalGate()
   });
+  const runtime = runtimeService || new GeneratedAppRuntimeService({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces });
+  app.locals.runtime = runtime;
+  const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null);
   const ready = Promise.all([execution.initialize(), autonomous.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
   app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-  app.use('/api/autonomous', (req, res, next) => {
+  app.use(['/api/autonomous', '/api/projects/:id/runtime'], (req, res, next) => {
     if (req.method !== 'POST') return next();
     if (!req.is('application/json')) return res.status(415).json({ error: 'Use application/json.' });
     if (req.get('origin')) {
@@ -55,34 +61,55 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     try {
       try { validateStart(req.body); } catch (error) { return res.status(400).json({ error: error.message }); }
       const result = await autonomous.start(req.body);
-      res.status(202).json(result);
+      res.status(202).json({ ...result, run: await present(result.run) });
     } catch (error) { next(error); }
+  });
+  app.get('/api/autonomous', async (req, res, next) => {
+    try { res.json(await Promise.all((await autonomous.runRepository.list()).map(present))); } catch (error) { next(error); }
   });
   app.get('/api/autonomous/:id', async (req, res, next) => {
     try {
       const run = await autonomous.runRepository.get(req.params.id);
       if (!run) return res.status(404).json({ error: 'Autonomous run not found.' });
-      res.json(run);
+      res.json(await present(run));
     } catch (error) { next(error); }
   });
   app.get('/api/autonomous/:id/events', async (req, res, next) => {
     try {
       const run = await autonomous.runRepository.get(req.params.id);
       if (!run) return res.status(404).json({ error: 'Autonomous run not found.' });
-      res.json(run.events);
+      const project = run.projectId ? await repository.get(run.projectId) : null;
+      res.json(run.events.map(event => eventSummary(event, run, project)));
     } catch (error) { next(error); }
   });
   for (const action of ['pause', 'resume']) app.post(`/api/autonomous/:id/${action}`, async (req, res, next) => {
     try {
       if (req.body && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) return res.status(400).json({ error: 'This action takes no configuration.' });
+      const current = await autonomous.runRepository.get(req.params.id);
+      if (action === 'resume' && current?.needsAttention) return res.status(409).json({ error: 'Needs Attention: trusted operator review is required.' });
       const run = await autonomous[action](req.params.id);
       if (!run) return res.status(404).json({ error: 'Autonomous run not found.' });
-      res.status(202).json(run);
+      res.status(202).json(await present(run));
     } catch (error) {
       if (error.message.startsWith('Run must be paused')) return res.status(409).json({ error: error.message });
       next(error);
     }
   });
+  app.use('/api/projects/:id/runtime', (req, res, next) => {
+    const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
+    let hostname;
+    try { hostname = new URL(`http://${req.get('host')}`).hostname; } catch { /* Reject invalid Host. */ }
+    if (!local || !['localhost', '127.0.0.1', '[::1]'].includes(hostname)) return res.status(403).json({ error: 'Runtime controls are localhost only.' });
+    next();
+  });
+  for (const action of ['start', 'stop', 'status']) {
+    app[action === 'status' ? 'get' : 'post'](`/api/projects/:id/runtime${action === 'status' ? '' : '/' + action}`, async (req, res, next) => {
+      try {
+        if (Object.keys(req.query).length || (action !== 'status' && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length))) return res.status(400).json({ error: 'Runtime accepts only a project ID and an empty JSON object.' });
+        res.json(await runtime[action](req.params.id));
+      } catch (error) { if (error.status) return res.status(error.status).json({ error: error.message }); next(error); }
+    });
+  }
   app.get('/api/projects', async (req, res, next) => { try { res.json((await repository.list()).map(summary)); } catch (e) { next(e); } });
   app.post('/api/projects', async (req, res, next) => {
     try { const result = validateProjectInput(req.body); if (!result.valid) return res.status(400).json({ error: 'Please correct the highlighted fields.', fields: result.errors });
@@ -137,7 +164,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     try {
       const project = await repository.get(req.params.id);
       if (!project) return res.status(404).json({ error: 'Project not found.' });
-      res.json(project.runs || []);
+      res.json(project.autonomousRunId ? (project.runs || []).map(run => ({ id: run.id, status: run.status, createdAt: run.createdAt })) : project.runs || []);
     } catch (e) { next(e); }
   });
   app.delete('/api/projects/:id', async (req, res, next) => { try { if ((await repository.get(req.params.id))?.autonomousRunId) return res.status(409).json({ error: 'Autonomous project deletion is disabled.' }); if (!await repository.delete(req.params.id)) return res.status(404).json({ error: 'Project not found.' }); res.status(204).end(); } catch (e) { next(e); } });
