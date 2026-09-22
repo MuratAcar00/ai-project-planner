@@ -295,3 +295,62 @@ The default server now supplies a trusted `isolatedRuntimeRoot` under `.cache/co
 Execution stderr and process termination metadata now reach `FailureAnalyzer`. Recognized read-only filesystem, initialization, spawn and connection failures pause development with `needsAttention`, before a repair is reserved.
 
 After a successful real provider smoke test, a trusted operator may call `AutonomousProjectService.retryInfrastructureFailure(runId)`, then `resume(runId)`. Recovery is not exposed through HTTP. It accepts only an idle failed run whose failed tasks have infrastructure evidence. Original execution runs remain in audit history; obsolete infrastructure repair tasks are archived, their budget reservations refunded, and development tasks reset to pending. A persisted project receipt permits retry after a checkpoint write failure without double refunds. Application failures cannot use this recovery path.
+
+### Publish completed generated projects
+
+Completed, validated autonomous apps can be published with **Publish to GitHub** on
+an app card. Stop its runtime first. The Factory remains at the repository root;
+only generated sources go into `projects/<safe-name>/`. The browser sends an empty
+JSON object to `POST /api/projects/:id/publish`; `GET` on the same path returns a
+small status DTO and a backend-generated GitHub URL. Both endpoints are localhost
+only; POST also checks JSON content type, Origin and cross-site fetch metadata.
+No request can select a command, path, commit message, branch or remote.
+
+The only destination is `git@github.com:MuratAcar00/ai-project-planner.git`, remote
+`origin`, branch `main`. Existing SSH authentication is used noninteractively;
+private keys are never read by the publisher. The publisher uses fixed Git
+arguments with `shell: false`, disables hooks and content filters, and does not
+run generated scripts. The source snapshot is bounded, scanned for secret-like
+filenames and credential patterns, and copied without following symlinks or
+hardlinks. Dependencies, runtime data, databases, sessions, logs, caches and
+validation artifacts are excluded. Unknown files are not copied. This conservative
+scanner is a safety gate, not a guarantee that arbitrary source code contains no
+secrets; suspicious source requires operator review. Source/config support is
+currently limited to the text formats listed in `project-publish-files.js`.
+
+Publishing uses isolated Git indexes. Existing staged or unstaged Factory changes
+are preserved. The local project commit advances local `main` with only the new
+project path. A **separate remote commit** is a direct child of the fetched remote
+`main`, with the same project files. Only that remote commit is pushed using an
+explicit normal refspec; local Factory checkpoints and their ancestors never enter
+the remote publication history. Local and remote commit hashes therefore differ.
+Do not subsequently run a blanket `git push origin main` to reconcile these
+histories; Factory releases require a separate, explicit operator decision.
+
+Project publishing metadata records the slug, snapshot hashes, local/remote commit
+IDs and publication status in the ignored project store. A backend-owned
+`.factory-publish.json` in the published directory records ownership without secrets.
+Slug collisions fail instead of overwriting. Repeating a successful publish creates
+no new commit. A failed push is not retried automatically; an explicit retry reuses
+the saved commits, or stops for review if the snapshot or remote main changed.
+The service reconciles a connection loss after a successful push before sending
+anything again. It does not force push, reset, clean or rebase.
+
+Trusted local operators can inspect the exact file list without copying, committing
+or fetching, then publish explicitly:
+
+```bash
+node scripts/publish-project.js --dry-run PROJECT_ID
+node scripts/publish-project.js --publish PROJECT_ID
+```
+
+For this CLI, ensure the Factory and generated runtimes are stopped first. The UI
+coordinates its own runtime with publishing. A repository-wide exclusive lock at
+`.git/factory-publish.lock` rejects simultaneous publishers. After a process crash,
+a trusted operator must confirm no publisher is running before removing a stale
+lock. Interrupted partial copies or unrelated local/remote history changes require
+operator review; existing project directories are never silently overwritten.
+
+Publishing tests mock network Git operations. An additional temporary local Git
+repository checks actual commit trees and preservation of staged Factory files;
+no test pushes to GitHub.

@@ -1,4 +1,5 @@
 const express = require('express');
+const { GeneratedProjectPublisher } = require('./services/generated-project-publisher');
 const { GeneratedAppRuntimeService } = require('./services/generated-app-runtime-service');
 const { runSummary, eventSummary } = require('./autonomous/presentation');
 const path = require('node:path');
@@ -26,7 +27,7 @@ const summary = project => {
   return { ...project, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0 };
 };
 
-function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate, runtimeService } = {}) {
+function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate, runtimeService, publisherService } = {}) {
   const app = express();
   const repository = projectRepository || new JsonProjectRepository(dataFile || path.join(__dirname, '..', 'data', 'projects.json'));
   const planning = plannerService || new PlannerService({ providers: [new TemplatePlannerProvider(), new AutonomousPlannerProvider()] });
@@ -41,13 +42,15 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
   });
   const runtime = runtimeService || new GeneratedAppRuntimeService({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces });
   app.locals.runtime = runtime;
+  const publisher = publisherService || new GeneratedProjectPublisher({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces, runtimeService: runtime });
+  app.locals.publisher = publisher;
   const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null);
   const ready = Promise.all([execution.initialize(), autonomous.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
   app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-  app.use(['/api/autonomous', '/api/projects/:id/runtime'], (req, res, next) => {
+  app.use(['/api/autonomous', '/api/projects/:id/runtime', '/api/projects/:id/publish'], (req, res, next) => {
     if (req.method !== 'POST') return next();
     if (!req.is('application/json')) return res.status(415).json({ error: 'Use application/json.' });
     if (req.get('origin')) {
@@ -95,17 +98,30 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       next(error);
     }
   });
-  app.use('/api/projects/:id/runtime', (req, res, next) => {
+  app.use(['/api/projects/:id/runtime', '/api/projects/:id/publish'], (req, res, next) => {
     const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress);
     let hostname;
     try { hostname = new URL(`http://${req.get('host')}`).hostname; } catch { /* Reject invalid Host. */ }
     if (!local || !['localhost', '127.0.0.1', '[::1]'].includes(hostname)) return res.status(403).json({ error: 'Runtime controls are localhost only.' });
     next();
   });
+  for (const method of ['get', 'post']) {
+    app[method]('/api/projects/:id/publish', async (req, res, next) => {
+      try {
+        if (Object.keys(req.query).length || (method === 'post' && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length))) return res.status(400).json({ error: 'Publishing accepts only a project ID and an empty JSON object.' });
+        if (method === 'post' && req.get('sec-fetch-site') === 'cross-site') return res.status(403).json({ error: 'Cross-origin control is disabled.' });
+        res.json(await publisher[method === 'post' ? 'publish' : 'status'](req.params.id));
+      } catch (error) {
+        if (error.safePublishError) return res.status(error.status).json({ error: error.message });
+        next(error);
+      }
+    });
+  }
   for (const action of ['start', 'stop', 'status']) {
     app[action === 'status' ? 'get' : 'post'](`/api/projects/:id/runtime${action === 'status' ? '' : '/' + action}`, async (req, res, next) => {
       try {
         if (Object.keys(req.query).length || (action !== 'status' && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length))) return res.status(400).json({ error: 'Runtime accepts only a project ID and an empty JSON object.' });
+        if (action === 'start' && publisher.active?.has(req.params.id)) return res.status(409).json({ error: 'Wait for publishing to finish before starting this app.' });
         res.json(await runtime[action](req.params.id));
       } catch (error) { if (error.status) return res.status(error.status).json({ error: error.message }); next(error); }
     });

@@ -20,7 +20,7 @@ function controls(run) {
   return `<div class="actions"><a class="button secondary" href="#/run/${encodeURIComponent(run.id)}">View Progress</a>${run.canPause ? `<button data-run="${esc(run.id)}" data-action="pause">Pause</button>` : ''}${run.canResume ? `<button data-run="${esc(run.id)}" data-action="resume">Resume</button>` : ''}</div>${run.needsAttention ? '<p class="metadata">Operator review required. Infrastructure recovery is available only to a trusted server operator.</p>' : ''}`;
 }
 function card(run) {
-  return `<article class="project-card">${badge(run)}<h3>${esc(run.name)}</h3><p>${esc(run.selectedIdea || 'Selecting a SaaS idea…')}</p><p class="metadata">Project: ${esc(run.projectStatus)} · Run: ${esc(run.state)}</p><progress max="100" value="${run.progress}">${run.progress}%</progress><p class="metadata">${run.progress}% · ${run.completedTasks} / ${run.totalTasks} tasks</p><p>Phase: ${esc(run.currentPhase)}<br>Task: ${esc(run.currentTask || '—')}</p><p class="metadata">Fix attempts: ${run.fixAttempts} · Created ${esc(new Date(run.createdAt).toLocaleString())}</p>${controls(run)}${run.state === 'completed' && run.projectId ? `<div class="runtime" data-runtime="${esc(run.projectId)}">Loading app runtime…</div>` : ''}</article>`;
+  return `<article class="project-card">${badge(run)}<h3>${esc(run.name)}</h3><p>${esc(run.selectedIdea || 'Selecting a SaaS idea…')}</p><p class="metadata">Project: ${esc(run.projectStatus)} · Run: ${esc(run.state)}</p><progress max="100" value="${run.progress}">${run.progress}%</progress><p class="metadata">${run.progress}% · ${run.completedTasks} / ${run.totalTasks} tasks</p><p>Phase: ${esc(run.currentPhase)}<br>Task: ${esc(run.currentTask || '—')}</p><p class="metadata">Fix attempts: ${run.fixAttempts} · Created ${esc(new Date(run.createdAt).toLocaleString())}</p>${controls(run)}${run.state === 'completed' && run.projectId ? `<div class="runtime" data-runtime="${esc(run.projectId)}">Loading app runtime…</div><div class="publishing" data-publish="${esc(run.projectId)}">Loading publish status…</div>` : ''}</article>`;
 }
 function runtimeControls(runtime) {
   return `<p class="metadata">App: ${esc(runtime.status)}</p><div class="actions">${runtime.status === 'stopped' ? `<button data-project="${esc(runtime.projectId)}" data-runtime-action="start">Start App</button>` : `<button data-project="${esc(runtime.projectId)}" data-runtime-action="stop">Stop App</button>`}${runtime.status === 'running' && /^http:\/\/127\.0\.0\.1:\d+$/.test(runtime.url) ? `<a class="button secondary" href="${esc(runtime.url)}" target="_blank" rel="noopener noreferrer">Open App</a>` : ''}</div>`;
@@ -31,7 +31,33 @@ async function refreshRuntimes(version) {
     catch { if (element.isConnected) element.textContent = 'Runtime status unavailable.'; }
   }));
 }
+function publishControls(state) {
+  if (state.publishStatus === 'published') return `<p class="metadata">Published ✓</p>${state.githubUrl ? `<a class="button secondary" href="${esc(state.githubUrl)}" target="_blank" rel="noopener noreferrer">View on GitHub</a>` : ''}`;
+  return `<button data-project="${esc(state.projectId)}" data-publish-action ${state.canPublish ? '' : 'disabled'}>${state.publishStatus === 'publishing' ? 'Publishing...' : 'Publish to GitHub'}</button>${state.message ? `<p class="metadata">${esc(state.message)}</p>` : ''}`;
+}
+async function refreshPublishing(version) {
+  await Promise.all([...document.querySelectorAll('[data-publish]')].map(async element => {
+    try { const state = await api(`/api/projects/${encodeURIComponent(element.dataset.publish)}/publish`); if (version === routeVersion && element.isConnected) element.innerHTML = publishControls(state); }
+    catch { if (element.isConnected) element.textContent = 'Publish status unavailable.'; }
+  }));
+}
+function bindPublishing(refresh) {
+  document.querySelectorAll('[data-publish-action]').forEach(button => {
+    button.onclick = async () => {
+      if (busy || button.disabled) return;
+      busy = true;
+      button.disabled = true;
+      button.textContent = 'Publishing...';
+      const message = document.querySelector('#factory-message');
+      message.textContent = 'Publishing...';
+      try { await post(`/api/projects/${encodeURIComponent(button.dataset.project)}/publish`); message.textContent = 'Published successfully.'; }
+      catch (error) { message.textContent = error.message; }
+      finally { busy = false; await refresh(); }
+    };
+  });
+}
 function bindControls(refresh) {
+  bindPublishing(refresh);
   document.querySelectorAll('[data-action], [data-runtime-action]').forEach(button => {
     button.disabled = busy;
     button.onclick = async () => {
@@ -70,7 +96,7 @@ function setupFactory() {
       document.querySelector('#factory-stats').innerHTML = [['Total Projects', projects.length], ['Building', runs.filter(r => !terminal(r) && r.state !== 'paused').length], ['Completed', runs.filter(r => r.state === 'completed').length], ['Needs Attention', runs.filter(r => r.needsAttention || r.state === 'failed').length]].map(([label, count]) => `<div><strong>${count}</strong><span>${label}</span></div>`).join('');
       document.querySelector('#active-run').innerHTML = active ? `<div class="panel active"><h2>${active.state === 'paused' ? 'Your SaaS is paused' : 'Building your SaaS…'}</h2>${badge(active)}<p>Run ID: ${esc(active.id)}</p><p>${esc(active.currentPhase)} · ${esc(active.currentTask || 'Preparing next step')}</p><progress max="100" value="${active.progress}"></progress><p class="metadata">${active.progress}% · Elapsed ${Math.max(0, Math.floor((Date.now() - Date.parse(active.createdAt)) / 60000))} min</p></div>` : '';
       document.querySelector('#autonomous-projects').innerHTML = runs.length ? runs.map(card).join('') : '<p class="muted">Your first app starts here. Generate a SaaS idea and let the pipeline build it.</p>';
-      await refreshRuntimes(version);
+      await Promise.all([refreshRuntimes(version), refreshPublishing(version)]);
       if (version === routeVersion) bindControls(refresh);
     } catch (error) { if (version === routeVersion) { generate.disabled = true; document.querySelector('#factory-message').textContent = `Status unavailable: ${error.message}. Retrying…`; } }
     schedule(refresh, version);
@@ -101,7 +127,7 @@ async function runDetail(id) {
       if (version !== routeVersion) return;
       document.querySelector('#run-card').innerHTML = `<p class="metadata">Run ID: ${esc(run.id)}</p>${card(run)}`;
       document.querySelector('#timeline').innerHTML = events.map(event => `<li><time datetime="${esc(event.timestamp)}">${esc(new Date(event.timestamp).toLocaleString())}</time><span>${esc(event.message)}</span></li>`).join('');
-      await refreshRuntimes(version);
+      await Promise.all([refreshRuntimes(version), refreshPublishing(version)]);
       if (version === routeVersion) bindControls(refresh);
     } catch (error) { if (version === routeVersion) document.querySelector('#factory-message').textContent = error.message; }
     schedule(refresh, version);
