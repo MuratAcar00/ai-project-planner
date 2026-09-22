@@ -1,0 +1,10 @@
+{
+  "name": "document-watch",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "build": "node --check src/server.js"
+  }
+}
