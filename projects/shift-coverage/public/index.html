@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Shift Coverage — Organizer dashboard</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script></head>
+<body>
+<noscript><p class="empty">JavaScript is required to manage shift coverage. Enable it and reload this page.</p></noscript>
+<a class="skip" href="#main">Skip to dashboard</a>
+<header class="topbar"><a class="brand" href="/"><span class="logo" aria-hidden="true">S</span> Shift Coverage</a><span class="workspace">Community organizer workspace</span></header>
+<main id="main">
+<div class="heading"><div><p class="eyebrow">PEOPLE IN PLACE. EVENTS READY.</p><h1>Your coverage, at a glance.</h1><p class="muted">Plan the shifts. Bring your people together. Spot the gaps early.</p></div><button id="export" class="secondary" disabled>↓ Export summary</button></div>
+<div id="notice" role="status" aria-live="polite"></div><div id="error" role="alert" hidden><span></span> <button id="retry" class="secondary">Retry loading</button></div>
+<section class="event-bar" aria-label="Event selection"><label for="event">CURRENT EVENT</label><select id="event" disabled><option>Loading events…</option></select><button id="edit-event" class="secondary" disabled>Edit event</button><button id="new-event" disabled>+ New event</button></section>
+<p id="loading" role="status">Loading your workspace…</p>
+<div id="dashboard" aria-busy="true" inert>
+<section class="stats" aria-label="Coverage totals"><article><p>Total shifts</p><strong id="total">—</strong><span>in this event</span></article><article><p>Filled spots</p><strong id="filled">—</strong><span id="capacity">waiting for coverage</span></article><article class="gap-stat"><p>Open spots</p><strong id="gaps">—</strong><span>still need a volunteer</span></article><article><p>Fully covered</p><strong id="covered">—</strong><span>shifts ready to go</span></article></section>
+<section class="coverage-overview" aria-labelledby="coverage-title"><div><h2 id="coverage-title">Coverage readiness</h2><p id="coverage-message" class="muted">Waiting for your event.</p></div><progress id="coverage-progress" max="100" value="0" aria-label="Event spots filled"></progress></section>
+<div class="columns"><section class="panel"><div class="panel-heading"><div><h2>Event shifts</h2><p id="event-detail" class="muted">Loading your workspace…</p></div><button id="new-shift" disabled>+ Add shift</button></div><div class="filters"><label><input type="checkbox" id="gaps-only"> Show only coverage gaps</label><span id="shift-count" class="muted"></span></div><div id="shifts"><p class="empty">Loading shifts…</p></div></section>
+<aside class="panel volunteers"><div class="panel-heading"><div><h2>Your volunteers</h2><p class="muted">Available across all events</p></div></div><form id="volunteer-form"><label for="volunteer-name">Add a volunteer</label><div class="inline"><input id="volunteer-name" name="name" maxlength="200" required placeholder="Full name"><button type="submit">Add</button></div></form><ul id="volunteers"><li class="empty">Loading volunteers…</li></ul><p class="hint">Add volunteers here, then assign them to a shift. Each shift shows how many spots are still open.</p></aside></div>
+</div><footer>Small teams. Well-covered events.</footer>
+</main>
+<dialog id="editor" aria-labelledby="editor-title"><form id="editor-form"><div class="panel-heading"><h2 id="editor-title"></h2><button type="button" id="close-editor" class="icon" aria-label="Close form">×</button></div><div id="editor-fields"></div><p id="form-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-editor" class="secondary">Cancel</button><button id="save-editor" type="submit">Save</button></div></form></dialog>
+</body></html>

@@ -1,0 +1,11 @@
+{
+  "name": "shift-coverage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "build": "node --check src/server.js"
+  }
+}
