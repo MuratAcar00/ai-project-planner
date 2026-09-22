@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Service Calendar · Workshop maintenance</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to equipment</a>
+  <header class="topbar"><a class="brand" href="/" aria-label="Service Calendar home"><span class="logo" aria-hidden="true">S</span> Service Calendar</a><span class="workspace">YOUR WORKSHOP</span></header>
+  <main id="main">
+    <noscript><p class="notice">Enable JavaScript to register equipment and manage maintenance in this dashboard.</p></noscript>
+    <section class="heading"><div><p class="eyebrow">MAINTENANCE, UNDER CONTROL</p><h1>Keep your workshop running.</h1><p class="muted">Plan the next service. Keep a record of every repair.</p></div><div class="actions"><button id="export" class="secondary">Export summary</button><button id="add">+ Register equipment</button></div></section>
+    <div id="notice" role="status" class="notice" hidden></div>
+    <section class="stats" aria-label="Maintenance overview"><article><span>Total equipment</span><strong id="total">—</strong></article><article><span>Overdue</span><strong id="overdue">—</strong></article><article><span>Due today</span><strong id="due">—</strong></article><article><span>Scheduled</span><strong id="scheduled">—</strong></article></section>
+    <section class="panel"><div class="panel-heading"><div><h2>Your equipment</h2><p class="muted">A clear view of what needs attention.</p></div><button id="refresh" class="secondary">Refresh</button></div><div class="toolbar"><label class="search">Search equipment<input id="search" type="search" placeholder="Search name or location" maxlength="200"></label><label>Service status<select id="filter"><option value="all">All equipment</option><option value="overdue">Overdue</option><option value="due">Due today</option><option value="scheduled">Scheduled</option></select></label></div><p id="list-state" role="status">Loading equipment…</p><div id="equipment" class="equipment-list" aria-busy="true"></div></section>
+    <footer>Small routines. Fewer interruptions.<span>Schedules use UTC calendar dates.</span></footer>
+  </main>
+  <dialog id="editor" aria-labelledby="editor-title"><form id="equipment-form"><div class="dialog-heading"><h2 id="editor-title">Register equipment</h2><button type="button" class="close secondary" data-close="editor" aria-label="Close equipment form">×</button></div><label>Equipment name<input name="name" required maxlength="200" placeholder="e.g. Workshop lathe"></label><label>Location <span class="muted">(optional)</span><input name="location" maxlength="200" placeholder="e.g. Main workshop"></label><div class="form-grid"><label>Service interval (days)<input name="intervalDays" type="number" min="1" max="3650" step="1" required></label><label>Initial due date<input name="nextServiceDate" type="date" min="1900-01-01" max="9989-12-31" required></label></div><p class="hint">After a service is recorded, the next due date is the latest service date plus this interval.</p><label>Equipment notes <span class="muted">(optional)</span><textarea name="notes" maxlength="2000" rows="3"></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary" data-close="editor">Cancel</button><button type="submit">Save equipment</button></div></form></dialog>
+  <dialog id="history" aria-labelledby="history-title"><div class="dialog-heading"><div><p class="eyebrow">SERVICE LOG</p><h2 id="history-title">Service history</h2></div><button class="close secondary" data-close="history" aria-label="Close service history">×</button></div><p id="history-state" role="status"></p><button id="history-retry" class="secondary" hidden>Retry history</button><div id="history-list"></div><form id="service-form"><h3>Record completed service</h3><div class="form-grid"><label>Service date<input name="date" type="date" min="1900-01-01" max="9989-12-31" required></label><label>Technician <span class="muted">(optional)</span><input name="technician" maxlength="200"></label></div><label>Work completed<textarea name="description" maxlength="2000" rows="3" required placeholder="Describe the maintenance or repair"></textarea></label><p class="form-error" role="alert"></p><div class="dialog-actions"><button type="submit">Record service</button></div></form></dialog>
+</body>
+</html>
