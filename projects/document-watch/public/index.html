@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Document Watch</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to documents</a>
+  <header class="topbar"><a class="brand" href="/" aria-label="Document Watch home"><span class="brand-icon" aria-hidden="true">D</span> Document Watch</a><span class="local-label">Your office, organized</span></header>
+  <main id="main">
+    <div class="heading"><div><p class="eyebrow">DOCUMENT REGISTER</p><h1>Stay ahead of expiry.</h1><p class="subtitle">A clear view of your documents and the renewals that need attention.</p></div><button id="add" class="primary">+ Register document</button></div>
+    <section class="stats" aria-label="Document overview">
+      <article><span>Total documents</span><strong id="total">—</strong><small>In your register</small></article>
+      <article><span>Expired</span><strong id="expired">—</strong><small>Review for renewal</small></article>
+      <article><span>Due in 30 days</span><strong id="soon">—</strong><small>Including today · UTC</small></article>
+      <article><span>Owners</span><strong id="owners">—</strong><small>People responsible</small></article>
+    </section>
+    <section class="register" aria-labelledby="register-title">
+      <div class="section-heading"><div><h2 id="register-title">Your documents</h2><p>Metadata only. Keep original files wherever you work.</p></div><button id="export" disabled>↓ Export summary</button></div>
+      <form id="filters" class="filters"><label>Expiry window<select id="window"><option value="all">All dates</option><option value="30">Next 30 days</option><option value="60">Next 60 days</option><option value="90">Next 90 days</option><option value="expired">Expired</option><option value="custom">Custom dates</option></select></label><label>Owner<select id="owner-filter"><option value="">All owners</option></select></label><div id="custom-dates" class="date-filters" hidden><label>From<input id="from" type="date" min="0001-01-01" max="9999-12-31"></label><label>To<input id="to" type="date" min="0001-01-01" max="9999-12-31"></label></div><button type="submit">Apply filters</button><button id="reset" type="button" class="quiet">Reset</button></form>
+      <div id="feedback" role="status" aria-live="polite"></div><div id="error" role="alert" hidden><span></span> <button id="retry">Try again</button></div>
+      <div id="results" aria-busy="true"><p class="empty">Loading your documents…</p></div>
+      <div class="table-footer"><span id="count">Connecting to your register…</span><span>Sorted by expiry date · UTC</span></div>
+    </section>
+    <footer>Document Watch <span>Small details. Fewer missed deadlines.</span></footer>
+  </main>
+  <dialog id="editor" aria-labelledby="editor-title"><form id="document-form"><div class="dialog-heading"><h2 id="editor-title">Register document</h2><button type="button" id="close" aria-label="Close editor" class="quiet">✕</button></div><p class="subtitle">Track the details that matter. No file uploads needed.</p><label>Document title <span>(required)</span><input name="title" required maxlength="200" autocomplete="off"></label><div class="form-row"><label>Owner <span>(required)</span><input name="owner" required maxlength="120" autocomplete="off"></label><label>Expiry date <span>(required)</span><input name="expiryDate" type="date" required min="0001-01-01" max="9999-12-31"></label></div><label>Category <span>(optional)</span><input name="category" maxlength="100" placeholder="e.g. Insurance, license, contract"></label><label>Notes <span>(optional)</span><textarea name="notes" maxlength="2000" rows="3" placeholder="Renewal steps or useful context"></textarea></label><p id="form-error" role="alert"></p><div class="dialog-actions"><button id="delete" class="danger" type="button" hidden>Delete document</button><button id="save" class="primary" type="submit">Save document</button></div></form></dialog>
+</body>
+</html>
