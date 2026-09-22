@@ -69,9 +69,16 @@ class WorkspaceValidationService {
     const visit = async (directory, depth = 0) => {
       if (depth > 12) throw new Error('Workspace exceeds validation depth limit.');
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-        if (entry.isSymbolicLink()) throw new Error('Symlinks are not allowed in autonomous validation.');
-        if (/^(\.env(?:\..*)?|\.npmrc|\.git|secrets|credentials)$/i.test(entry.name) || /\.(pem|key)$/i.test(entry.name)) throw new Error('Sensitive or configuration files are not allowed in validation workspace.');
         const target = path.join(directory, entry.name);
+        const relative = JSON.stringify(path.relative(workspace, target));
+        if (entry.isSymbolicLink()) throw new Error(`Symlinks are not allowed in autonomous validation: ${relative}`);
+        // Only the empty root metadata directory is safe without reading Git content.
+        // Git files (including worktree pointers), nested and populated metadata fail closed.
+        if (entry.name.toLowerCase() === '.git') {
+          if (depth === 0 && entry.name === '.git' && entry.isDirectory() && !(await fs.readdir(target)).length) continue;
+          throw Object.assign(new Error(`Git metadata requires operator review: ${relative}`), { infrastructureError: true });
+        }
+        if (/^(\.env(?:\..*)?|\.npmrc|secrets?|credentials?)(?:$|[._-])/i.test(entry.name) || /\.(pem|key|p12|pfx)$/i.test(entry.name) || /^(?:id_(rsa|ed25519|ecdsa|dsa)|private[-_]?key)(?:$|[._-])/i.test(entry.name)) throw new Error(`Sensitive or configuration files are not allowed in validation workspace: ${relative}`);
         if (entry.name === '.validation') continue;
         if (entry.isDirectory()) await visit(target, depth + 1);
         else if (entry.isFile()) {
@@ -99,12 +106,21 @@ class WorkspaceValidationService {
     }
     return { files, testFiles };
   }
-  async validate({ projectId }) {
+  async validate(context) {
+    try { return await this.validateWorkspace(context); }
+    catch (error) {
+      return { passed: false, infrastructureError: true, checks: [{ name: 'validation-infrastructure', passed: false, infrastructureError: true, error: 'Validation infrastructure could not complete.', code: error.code || 'VALIDATOR_ERROR' }] };
+    }
+  }
+  async validateWorkspace({ projectId }) {
     const checks = [];
     const workspace = await this.workspaceService.getWorkspacePath(projectId);
     let inspection;
     try { inspection = await this.inspect(workspace); }
-    catch (error) { return { passed: false, checks: [{ name: 'contract', passed: false, error: error.message }] }; }
+    catch (error) {
+      const infrastructureError = Boolean(error.infrastructureError || ['EACCES', 'EPERM', 'EIO'].includes(error.code));
+      return { passed: false, infrastructureError, checks: [{ name: 'contract', passed: false, error: error.message, infrastructureError }] };
+    }
     for (const relative of ['.validation', '.validation/home', '.validation/tmp', '.validation/npm-cache']) {
       const target = path.join(workspace, relative);
       await fs.mkdir(target, { recursive: true });

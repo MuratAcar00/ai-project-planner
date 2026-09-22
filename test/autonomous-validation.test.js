@@ -129,3 +129,56 @@ test('npm configuration paths are distinct and config initialization errors are 
   assert.ok(args.includes('--globalconfig=/workspace/.validation/empty-global.npmrc'));
   assert.equal(await fs.readFile(path.join(f.workspace, '.validation/empty-global.npmrc'), 'utf8'), '');
 });
+
+test('empty root Git metadata is excluded from source inspection and validation passes', async t => {
+  const f = await validationFixture(t);
+  await fs.mkdir(path.join(f.workspace, '.git'));
+  assert.ok(!(await f.validation.inspect(f.workspace)).files.includes('.git'));
+  assert.equal((await f.validation.validate({ projectId: 'validation-fixture' })).passed, true);
+});
+
+test('Git metadata pointers, populated metadata and nested Git fail closed for operator review', async t => {
+  for (const kind of ['pointer', 'populated', 'nested']) {
+    const f = await validationFixture(t);
+    const git = path.join(f.workspace, kind === 'nested' ? 'src/.git' : '.git');
+    if (kind === 'pointer') await fs.writeFile(git, 'gitdir: ../../outside');
+    else {
+      await fs.mkdir(git);
+      if (kind === 'populated') await fs.writeFile(path.join(git, 'config'), 'test metadata');
+    }
+    const result = await f.validation.validate({ projectId: 'validation-fixture' });
+    assert.equal(result.passed, false);
+    assert.equal(result.infrastructureError, true);
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test('sensitive filenames and Git symlinks remain rejected with safe relative paths', async t => {
+  for (const name of ['.env', '.env.production', '.npmrc', 'private.key', 'private.pem', 'private-key.txt', 'credentials.json', 'secret-token', 'id_rsa']) {
+    const f = await validationFixture(t);
+    await fs.writeFile(path.join(f.workspace, name), 'fixture');
+    const result = await f.validation.validate({ projectId: 'validation-fixture' });
+    assert.equal(result.passed, false, name);
+    assert.ok(result.checks[0].error.includes(JSON.stringify(name)));
+    assert.equal(f.calls.length, 0);
+  }
+  const f = await validationFixture(t);
+  await fs.symlink(f.directory, path.join(f.workspace, '.git'));
+  assert.match((await f.validation.validate({ projectId: 'validation-fixture' })).checks[0].error, /Symlinks/);
+});
+
+test('workspace traversal and validation-directory symlinks cannot escape the workspace', async t => {
+  const f = await validationFixture(t);
+  await assert.rejects(() => f.dependencies.workspaceService.getWorkspacePath('../outside'), /not valid/);
+  await fs.symlink(f.directory, path.join(f.workspace, '.validation'));
+  assert.equal((await f.validation.validate({ projectId: 'validation-fixture' })).passed, false);
+  assert.equal(f.calls.length, 0);
+});
+
+test('validator exceptions return infrastructure evidence rather than application failures', async t => {
+  const f = await validationFixture(t);
+  f.validation.runner.run = async () => { throw new Error('runner initialization failed'); };
+  const result = await f.validation.validate({ projectId: 'validation-fixture' });
+  assert.equal(result.infrastructureError, true);
+  assert.equal(result.checks[0].name, 'validation-infrastructure');
+});

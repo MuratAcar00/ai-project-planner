@@ -164,6 +164,59 @@ class AutonomousProjectService {
     });
   }
 
+  // Trusted operator-only recovery for the legacy empty-root-.git false rejection.
+  // Revalidate before any persistent mutation; retain tasks, executions and failed checks.
+  async recoverValidationInfrastructureFailure(id) {
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run || this.jobs.has(id)) throw new Error('Recovery requires an idle existing run.');
+      const project = await this.projectRepository.get(run.projectId);
+      if (!project || project.autonomousRunId !== id) throw new Error('Recovery project ownership mismatch.');
+      if (run.state === 'completed' && run.validationInfrastructureRecovery) {
+        await this.projectRepository.update(project.id, stored => { stored.status = 'Completed'; return true; });
+        return run;
+      }
+      if (run.state !== 'failed' || run.pendingFailure?.kind !== 'validation' ||
+          !allTasks(project).length || allTasks(project).some(task => !task.completed || task.status !== 'completed') ||
+          project.runs.some(item => item.status === 'running')) throw new Error('Recovery requires failed validation and completed tasks.');
+      const legacyError = 'Sensitive or configuration files are not allowed in validation workspace.';
+      const legacy = record => record && record.passed === false && record.checks?.length === 1 &&
+        record.checks[0].name === 'contract' && record.checks[0].error === legacyError;
+      if (!legacy(run.validationResults.find(item => item.id === run.pendingFailure.validationId))) throw new Error('Recovery requires legacy Git contract evidence.');
+      const workspace = await this.workspaceService.getWorkspacePath(project.id);
+      const fs = require('node:fs/promises');
+      const path = require('node:path');
+      const git = path.join(workspace, '.git');
+      const metadata = await fs.lstat(git);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || (await fs.readdir(git)).length) throw new Error('Recovery requires empty root Git metadata.');
+      const reservations = run.events.filter(item => item.type === 'fix_started' && item.failure?.kind === 'validation' &&
+        legacy(run.validationResults.find(record => record.id === item.failure.validationId)));
+      const taskIds = [...new Set(reservations.map(item => item.taskId))];
+      if (!taskIds.length || taskIds.some(taskId => !allTasks(project).some(task => task.id === taskId && task.isFix && task.completed)) || run.fixAttempts < taskIds.length) throw new Error('Repair reconciliation evidence is incomplete.');
+      const result = await this.validationService.validate({ projectId: project.id });
+      if (result.passed !== true || !result.checks?.length || result.checks.some(check => !check.passed)) throw new Error('Recovery revalidation did not pass; state unchanged.');
+      const timestamp = new Date().toISOString();
+      const validation = { id: makeId('validation'), timestamp, ...result };
+      const receipt = { reason: 'Factory rejected empty root .git metadata as sensitive content; verified corrected validator.', taskIds,
+        refundedAttempts: taskIds.length, previousFixAttempts: run.fixAttempts, validationId: validation.id, timestamp };
+      const recovered = await this.runRepository.update(id, stored => {
+        if (stored.state !== 'failed' || stored.pendingFailure?.validationId !== run.pendingFailure.validationId) throw new Error('Recovery checkpoint changed.');
+        stored.validationResults.push(validation);
+        Object.assign(stored, { state: 'completed', validationPassed: true, pendingFailure: null, failureAnalysis: null,
+          activeFixTaskId: null, needsAttention: false, error: null, pauseReason: null, resumeState: null,
+          fixAttempts: run.fixAttempts - taskIds.length, validationInfrastructureRecovery: receipt, completedAt: timestamp, updatedAt: timestamp });
+        event(stored, 'validation_passed', { validationId: validation.id });
+        event(stored, 'validation_infrastructure_recovered', receipt);
+        event(stored, 'state_changed', { from: 'failed', to: 'completed', reason: receipt.reason });
+        event(stored, 'project_completed');
+        return true;
+      });
+      // Retrying after a project-write interruption completes this step without a second refund.
+      await this.projectRepository.update(project.id, stored => { stored.status = 'Completed'; return true; });
+      return recovered;
+    });
+  }
+
   async move(id, state, patch = {}, events = []) {
     return this.runRepository.update(id, run => {
       Object.assign(run, patch);
@@ -294,10 +347,12 @@ class AutonomousProjectService {
           const record = { id: validation.validationId, timestamp: new Date().toISOString(), ...result };
           const failedCheck = result.checks?.find(check => !check.passed);
           await this.move(id, 'testing', { validationResults: [...run.validationResults, record], validationPassed: result.passed === true,
-            pendingFailure: result.passed ? null : { kind: 'validation', validationId: record.id, checkName: failedCheck?.name, message: JSON.stringify(failedCheck || result).slice(0, 2500) } },
+            pendingFailure: result.passed ? null : { kind: 'validation', validationId: record.id, checkName: failedCheck?.name, infrastructureError: Boolean(result.infrastructureError || failedCheck?.infrastructureError), message: JSON.stringify(failedCheck || result).slice(0, 2500) } },
           [[result.passed ? 'validation_passed' : 'validation_failed', { validationId: record.id }]]);
-          if (result.infrastructureError) {
-            await this.move(id, 'testing', { pendingFailure: null });
+          if (result.infrastructureError || failedCheck?.infrastructureError) {
+            const failureAnalysis = this.failureAnalyzer.analyze({ kind: 'validation', infrastructureError: true, message: JSON.stringify(failedCheck || result).slice(0, 2500) });
+            await this.move(id, 'testing', { pendingFailure: null, failureAnalysis, needsAttention: true }, [['failure_analyzed', failureAnalysis]]);
+            await this.projectRepository.update(run.projectId, project => { project.status = 'Needs attention'; return true; });
             await this.pause(id, 'Validation sandbox unavailable; operator attention required.'); return;
           }
           break;
@@ -309,6 +364,7 @@ class AutonomousProjectService {
             await this.move(id, 'fixing', { failureAnalysis }, [['failure_analyzed', failureAnalysis]]);
             if (!failureAnalysis.recoverable) {
               await this.move(id, 'fixing', { needsAttention: true });
+              await this.projectRepository.update(run.projectId, project => { project.status = 'Needs attention'; return true; });
               await this.pause(id, failureAnalysis.recommendation); return;
             }
             break;

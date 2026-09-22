@@ -403,3 +403,79 @@ test('legacy validator configuration failure refunds its repair and resumes vali
   assert.equal((await finish(f.service, run.id)).state, 'completed');
   assert.equal(f.calls.length, 5);
 });
+
+test('Git metadata and structured validator failures pause without application repairs', async t => {
+  for (const check of [
+    { name: 'contract', passed: false, error: 'Git metadata requires operator review: ".git"' },
+    { name: 'contract', passed: false, infrastructureError: true, error: 'factory configuration failed' }
+  ]) {
+    const f = await fixture(t, { validate: () => ({ passed: false, checks: [check] }) });
+    const { run } = await f.service.start();
+    const paused = await finish(f.service, run.id);
+    assert.equal(paused.state, 'paused');
+    assert.equal(paused.fixAttempts, 0);
+    assert.equal(paused.failureAnalysis.category, 'infrastructure');
+    assert.equal(paused.events.some(item => item.type === 'fix_started'), false);
+    const project = await f.dependencies.projectRepository.get(paused.projectId);
+    assert.equal(project.status, 'Needs attention');
+    assert.equal(allTasks(project).some(task => task.isFix), false);
+  }
+});
+
+test('legacy Git recovery refunds only validation repairs and is restart-idempotent', async t => {
+  const fs = require('node:fs/promises');
+  const path = require('node:path');
+  let failTask = true;
+  let valid = false;
+  const f = await fixture(t, {
+    execute() { if (failTask) { failTask = false; throw new Error('Codex execution timed out after 600000ms.'); } return { success: true }; },
+    validate: () => valid ? { passed: true, checks: [{ name: 'tests', passed: true, output: '# pass 25' }] } :
+      { passed: false, checks: [{ name: 'contract', passed: false, error: 'Sensitive or configuration files are not allowed in validation workspace.' }] }
+  });
+  const { run } = await f.service.start();
+  const failed = await finish(f.service, run.id);
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.fixAttempts, 3);
+  const workspace = await f.dependencies.workspaceService.getWorkspacePath(failed.projectId);
+  await fs.mkdir(path.join(workspace, '.git'));
+  await assert.rejects(() => f.service.recoverValidationInfrastructureFailure(run.id), /revalidation did not pass/);
+  assert.deepEqual(await f.dependencies.runRepository.get(run.id), failed);
+  valid = true;
+  const update = f.dependencies.projectRepository.update.bind(f.dependencies.projectRepository);
+  let interrupted = true;
+  f.dependencies.projectRepository.update = async (...args) => {
+    if (interrupted) { interrupted = false; throw new Error('project checkpoint interrupted'); }
+    return update(...args);
+  };
+  await assert.rejects(() => f.service.recoverValidationInfrastructureFailure(run.id), /checkpoint interrupted/);
+  const recovered = await f.service.recoverValidationInfrastructureFailure(run.id);
+  assert.equal(recovered.state, 'completed');
+  assert.equal(recovered.fixAttempts, 1);
+  assert.deepEqual(recovered.validationInfrastructureRecovery.taskIds, [`${run.id}-fix-2`, `${run.id}-fix-3`]);
+  assert.equal(recovered.projectId, failed.projectId);
+  assert.equal(recovered.validationResults.length, failed.validationResults.length + 1);
+  assert.deepEqual(recovered.events.slice(0, failed.events.length), failed.events);
+  const project = await f.dependencies.projectRepository.get(failed.projectId);
+  assert.equal(project.status, 'Completed');
+  assert.equal(allTasks(project).filter(task => task.isFix).length, 3);
+  assert.equal((await f.dependencies.runRepository.list()).length, 1);
+  assert.equal((await f.dependencies.projectRepository.list()).length, 1);
+});
+
+test('validation recovery rejects application failures and populated Git metadata', async t => {
+  const fs = require('node:fs/promises');
+  const path = require('node:path');
+  const f = await fixture(t, { validate: () => ({ passed: false, checks: [{ name: 'tests', passed: false, error: 'assertion failed' }] }) });
+  const { run } = await f.service.start();
+  const failed = await finish(f.service, run.id);
+  await assert.rejects(() => f.service.recoverValidationInfrastructureFailure(run.id), /legacy Git contract evidence/);
+  assert.equal((await f.dependencies.runRepository.get(run.id)).fixAttempts, 3);
+  const g = await fixture(t, { validate: () => ({ passed: false, checks: [{ name: 'contract', passed: false, error: 'Sensitive or configuration files are not allowed in validation workspace.' }] }) });
+  const started = await g.service.start();
+  const legacy = await finish(g.service, started.run.id);
+  const workspace = await g.dependencies.workspaceService.getWorkspacePath(legacy.projectId);
+  await fs.mkdir(path.join(workspace, '.git'));
+  await fs.writeFile(path.join(workspace, '.git/config'), 'fixture');
+  await assert.rejects(() => g.service.recoverValidationInfrastructureFailure(started.run.id), /empty root Git/);
+  assert.equal((await g.dependencies.runRepository.get(started.run.id)).fixAttempts, 3);
+});
