@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Decision Log — Remember the why</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to decisions</a>
+  <header class="topbar"><a class="brand" href="/" aria-label="Decision Log home"><span class="logo" aria-hidden="true">↳</span> Decision Log</a><span class="workspace">Your team’s shared memory</span></header>
+  <main id="main">
+    <section class="intro"><div><p class="eyebrow">LESS GUESSWORK. MORE CONTEXT.</p><h1>Remember the why.</h1><p class="subtitle">A home for your team’s decisions, and the thinking behind them.</p></div><button class="primary" id="create">+ New decision</button></section>
+    <section class="stats" aria-label="Decision overview"><div><span>Total decisions</span><strong id="total">—</strong><small>Your collective knowledge</small></div><div><span>Ready for review</span><strong id="due">—</strong><small>Due today or overdue</small></div><div><span>Upcoming reviews</span><strong id="upcoming">—</strong><small>Keep your thinking current</small></div></section>
+    <section class="library" aria-labelledby="library-title"><div class="section-heading"><div><h2 id="library-title">Decision library</h2><p>Good decisions deserve a paper trail.</p></div><button id="export" class="secondary" disabled>↓ Export JSON</button></div>
+      <div class="filters"><label class="search">Search decisions<input id="search" type="search" maxlength="200" placeholder="Search titles, context, alternatives…"></label><label>Tag<select id="tag"><option value="">All tags</option></select></label><label>Review date<select id="review"><option value="all">All reviews</option><option value="due">Ready for review</option><option value="upcoming">Upcoming</option><option value="none">No review date</option></select></label><button class="text-button" id="clear" hidden>Clear filters</button></div>
+      <p id="notice" role="status" class="notice"></p><div id="error" role="alert" class="error" hidden><span></span> <button id="retry" class="secondary">Try again</button></div>
+      <div id="results" aria-busy="true"><p class="empty">Loading your decisions…</p></div>
+    </section>
+    <footer>Capture the decision. Keep the context. Move forward together.</footer>
+  </main>
+  <dialog id="editor" aria-labelledby="editor-title"><form id="form"><div class="dialog-heading"><h2 id="editor-title">New decision</h2><button type="button" class="close" id="close" aria-label="Close editor">×</button></div><p class="muted">Give your future team the context they’ll need. * Required</p>
+    <label>Title *<input name="title" required maxlength="200" placeholder="What did your team decide?"></label>
+    <label>Context<textarea name="context" maxlength="10000" rows="3" placeholder="What problem led to this decision?"></textarea></label>
+    <label>Decision *<textarea name="decision" required maxlength="10000" rows="3" placeholder="Describe the choice and why it makes sense."></textarea></label>
+    <label>Alternatives considered<textarea name="alternatives" maxlength="60029" rows="3" aria-describedby="alternatives-help" placeholder="One alternative per line"></textarea></label><small id="alternatives-help">One per line. Up to 30 alternatives, 2,000 characters each.</small>
+    <div class="form-row"><div><label>Tags<input name="tags" maxlength="1019" aria-describedby="tags-help" placeholder="product, engineering"></label><small id="tags-help">Comma-separated. Up to 20 tags, 50 characters each.</small></div><label>Review date<input name="reviewDate" type="date" min="0001-01-01" max="9999-12-31"></label></div>
+    <p id="form-error" role="alert" class="error" hidden></p><div class="form-actions"><button type="button" class="secondary" id="cancel">Cancel</button><button class="primary" id="save" type="submit">Save decision</button></div>
+  </form></dialog>
+</body>
+</html>
