@@ -617,6 +617,20 @@ test('Flutter toolchain discovery failure pauses without consuming repair budget
   assert.equal(project.plan.phases.flatMap(phase => phase.tasks).some(task => task.isFix), false);
 });
 
+test('JDK security configuration failure pauses without creating a repair task or spending budget', async t => {
+  const output = 'Exception in thread "main" java.lang.InternalError: Error loading java.security file';
+  const f = await fixture(t, { validate: () => ({ passed: false, checks: [{ name: 'android-debug-apk', passed: false, exitCode: 1, infrastructureError: false, output }] }) });
+  const { run } = await f.service.start();
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'paused');
+  assert.equal(done.needsAttention, true);
+  assert.equal(done.fixAttempts, 0);
+  assert.equal(done.codexUsage.repairCalls, 0);
+  assert.equal(done.failureAnalysis.category, 'infrastructure');
+  const project = await f.dependencies.projectRepository.get(done.projectId);
+  assert.equal(project.plan.phases.flatMap(phase => phase.tasks).some(task => task.isFix), false);
+});
+
 test('missing dependencies fail safely without running blocked tasks', async t => {
   const entered = deferred(); const released = deferred();
   const f = await fixture(t, { async execute() { entered.resolve(); await released.promise; return {}; } });
