@@ -107,6 +107,21 @@ test('successful run creates requirements and plan, executes dependencies, valid
   assert.equal(done.selection.evaluations.length, 3);
 });
 
+test('Flutter scaffold setup failure pauses as infrastructure before execution without Codex usage', async t => {
+  const ideaProvider = { async generateIdeas() { return [{ id: 'field-tutor', name: 'Field Tutor', oneLinePitch: 'Support lessons in the field.', targetUser: 'Independent tutors', problem: 'Lesson feedback is scattered', solution: 'Record lessons and observations', coreFeatures: ['Track lessons'], complexity: 1, usefulness: 5, differentiation: 4, estimatedTasks: 4, testability: 5, deploymentSimplicity: 5, externalDependencies: [], paidApiRequired: false, generatedAt: new Date().toISOString() }]; } };
+  let setupCalls = 0;
+  const f = await fixture(t, { ideaProvider, flutterScaffolder: { async prepare(project) { setupCalls++; assert.equal(project.targetPlatform, 'mobile'); return { prepared: false, infrastructureError: true, error: 'Flutter CLI unavailable.' }; } } });
+  const { run } = await f.service.start();
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.needsAttention, true);
+  assert.equal(paused.pendingFailure.category, 'infrastructure');
+  assert.equal(setupCalls, 1);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(paused.codexUsage, { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 });
+  assert.ok(paused.events.some(event => event.type === 'workspace_setup_failed'));
+});
+
 test('task failure is repaired before the failed task and dependent tasks retry', async t => {
   let failed = false;
   const f = await fixture(t, { execute(task) { if (!failed) { failed = true; throw new Error('implementation error'); } return { success: true }; } });

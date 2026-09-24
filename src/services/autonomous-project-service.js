@@ -6,6 +6,7 @@ const { FailureAnalyzer } = require('./failure-analyzer');
 const { CODEX_BUDGET, codexUsage } = require('../autonomous/codex-budget');
 const { failureFingerprint, workspaceFingerprint } = require('../autonomous/repair-progress');
 const { chooseTargetPlatform } = require('../autonomous/platform');
+const { FlutterWorkspaceScaffolder } = require('./flutter-workspace-scaffolder');
 
 const terminal = state => ['completed', 'failed'].includes(state);
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
@@ -23,9 +24,10 @@ function validateStart(input = {}) {
 
 class AutonomousProjectService {
   constructor({ runRepository, projectRepository, projectService, executionService, workspaceService,
-    ideaProvider, ideaEvaluator, validationService, approvalGate, executionProvider = 'codex', maxFixAttempts, maxIdeaBatches = Number(process.env.MAX_IDEA_BATCHES ?? 4), failureAnalyzer = new FailureAnalyzer() }) {
+    ideaProvider, ideaEvaluator, validationService, approvalGate, flutterScaffolder = null, executionProvider = 'codex', maxFixAttempts, maxIdeaBatches = Number(process.env.MAX_IDEA_BATCHES ?? 4), failureAnalyzer = new FailureAnalyzer() }) {
     Object.assign(this, { runRepository, projectRepository, projectService, executionService, workspaceService,
-      ideaProvider, ideaEvaluator, validationService, approvalGate, executionProvider, failureAnalyzer });
+      ideaProvider, ideaEvaluator, validationService, approvalGate,
+      flutterScaffolder: flutterScaffolder || new FlutterWorkspaceScaffolder({ workspaceService, projectRepository }), executionProvider, failureAnalyzer });
     this.maxFixAttempts = fixLimit(maxFixAttempts);
     if (!Number.isInteger(maxIdeaBatches) || maxIdeaBatches < 1 || maxIdeaBatches > 10) throw new Error('MAX_IDEA_BATCHES must be between 1 and 10.');
     this.maxIdeaBatches = maxIdeaBatches;
@@ -307,6 +309,24 @@ class AutonomousProjectService {
               { provider: 'autonomous', requirementItems: idea.coreFeatures.map((text, index) => ({ id: `requirement-${index + 1}`, text, acceptanceCriteria: `User can ${text.toLowerCase()}.` })) });
             }
             await this.workspaceService.getWorkspacePath(project.id);
+            if (project.targetPlatform === 'mobile') {
+              const result = await this.flutterScaffolder.prepare(project, id);
+              if (!result.prepared) {
+                const reason = `Flutter workspace setup failed: ${result.error}`;
+                await this.projectRepository.update(project.id, stored => { stored.status = 'Needs attention'; return true; });
+                await this.runRepository.update(id, stored => {
+                  stored.needsAttention = true;
+                  stored.pendingFailure = { kind: 'setup', category: 'infrastructure', message: reason };
+                  event(stored, 'workspace_setup_failed', { reason });
+                  stored.resumeState = stored.state;
+                  transition(stored, 'paused');
+                  stored.pauseReason = reason;
+                  event(stored, 'run_paused', { reason });
+                  return true;
+                });
+                return;
+              }
+            }
             await this.move(id, 'executing', { projectId: project.id }, [['project_created', { projectId: project.id }], ['plan_created', { planId: project.plan.id }]]);
           });
           break;

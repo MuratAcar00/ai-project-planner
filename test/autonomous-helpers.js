@@ -30,6 +30,7 @@ async function fixture(t, options = {}) {
   const dependencies = { runRepository, projectRepository, projectService, executionService, workspaceService,
     ideaProvider: options.ideaProvider || new TemplateIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
     approvalGate: options.approvalGate || new ApprovalGate(), executionProvider: options.executionProvider || 'fake', maxFixAttempts: options.maxFixAttempts ?? 3, maxIdeaBatches: options.maxIdeaBatches ?? 4,
+    flutterScaffolder: options.flutterScaffolder,
     validationService: { async validate(context) { validations++; return options.validate ? options.validate(validations, context) : { passed: true, checks: [] }; } } };
   const service = new AutonomousProjectService(dependencies);
   t.after(async () => { await Promise.all([...service.jobs.values()]); await fs.rm(directory, { recursive: true, force: true }); });

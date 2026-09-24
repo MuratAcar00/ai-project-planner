@@ -22,6 +22,7 @@ const { WorkspaceValidationService } = require('./services/workspace-validation-
 const { AutonomousProjectService, validateStart } = require('./services/autonomous-project-service');
 const { JsonAutonomousRunRepository } = require('./repositories/json-autonomous-run-repository');
 const { projectTargetPlatform } = require('./autonomous/platform');
+const { FlutterWorkspaceScaffolder } = require('./services/flutter-workspace-scaffolder');
 
 const summary = project => {
   const tasks = project.plan.phases.flatMap(phase => phase.tasks);
@@ -41,7 +42,9 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     runRepository: autonomousRunRepository || new JsonAutonomousRunRepository(path.join(path.dirname(dataFile || repository.filePath || path.join(__dirname, '..', 'data', 'projects.json')), 'autonomous-runs.json')),
     projectRepository: repository, projectService, executionService: execution, workspaceService: workspaces,
     ideaProvider: new LocalIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
-    validationService: new WorkspaceValidationService({ workspaceService: workspaces }), approvalGate: approvalGate || new ApprovalGate()
+    validationService: new WorkspaceValidationService({ workspaceService: workspaces }),
+    flutterScaffolder: new FlutterWorkspaceScaffolder({ workspaceService: workspaces, projectRepository: repository }),
+    approvalGate: approvalGate || new ApprovalGate()
   });
   const runtime = runtimeService || new GeneratedAppRuntimeService({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces });
   app.locals.runtime = runtime;
