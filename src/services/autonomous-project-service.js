@@ -9,6 +9,7 @@ const { chooseTargetPlatform } = require('../autonomous/platform');
 const { FlutterWorkspaceScaffolder } = require('./flutter-workspace-scaffolder');
 
 const terminal = state => ['completed', 'failed'].includes(state);
+const blocksNewAutonomousRun = run => !terminal(run.state) && !(run.state === 'paused' && run.needsAttention && run.pendingFailure?.kind === 'setup' && !run.projectId);
 const PLATFORM_PREFERENCES = ['auto', 'web', 'mobile', 'web_mobile'];
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
   const parsed = Number(value);
@@ -70,7 +71,7 @@ class AutonomousProjectService {
     await this.initialize();
     return this.serialize(async () => {
       const runs = await this.runRepository.list();
-      const existing = runs.find(run => config.requestId && run.config.requestId === config.requestId) || runs.find(run => !terminal(run.state));
+      const existing = runs.find(run => config.requestId && run.config.requestId === config.requestId) || runs.find(run => blocksNewAutonomousRun(run) || this.jobs.has(run.id));
       if (existing) return { run: existing, duplicate: true };
       const now = new Date().toISOString();
       const run = { id: makeId('autonomous'), state: 'idle', projectId: null, config, platformPreference: config.platformPreference, maxFixAttempts: this.maxFixAttempts,
@@ -585,4 +586,4 @@ class AutonomousProjectService {
     });
   }
 }
-module.exports = { AutonomousProjectService, validateStart, fixLimit, PLATFORM_PREFERENCES };
+module.exports = { AutonomousProjectService, validateStart, fixLimit, PLATFORM_PREFERENCES, blocksNewAutonomousRun };

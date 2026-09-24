@@ -11,4 +11,5 @@ test('single-project dashboard offers only the four safe platform preferences an
   assert.deepEqual(options, [['auto', 'Auto'], ['web', 'Web'], ['mobile', 'Mobile'], ['web_mobile', 'Web + Mobile']]);
   assert.match(source, /document\.querySelector\('#platform-preference'\)\.value/);
   assert.match(source, /JSON\.stringify\(\{ requestId, platformPreference \}\)/);
+  assert.match(source, /run\.blocksNewRun \?\? !terminal\(run\)/);
 });

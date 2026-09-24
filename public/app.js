@@ -95,10 +95,10 @@ function setupFactory() {
       const [result, projects, mode] = await Promise.all([api('/api/autonomous'), api('/api/projects'), api('/api/autonomous-mode')]);
       if (version !== routeVersion) return;
       runs = result; loaded = true;
-      const active = runs.find(run => !terminal(run));
+      const active = runs.find(run => run.blocksNewRun ?? !terminal(run));
       modeActive = mode.active;
       generate.disabled = starting || Boolean(active) || modeActive;
-      renderAutonomousMode(mode, refresh, Boolean(active));
+      renderAutonomousMode(mode, refresh, runs.some(run => !terminal(run)));
       document.querySelector('#factory-stats').innerHTML = [['Total Projects', projects.length], ['Building', runs.filter(r => !terminal(r) && r.state !== 'paused').length], ['Completed', runs.filter(r => r.state === 'completed').length], ['Needs Attention', runs.filter(r => r.needsAttention || r.state === 'failed').length]].map(([label, count]) => `<div><strong>${count}</strong><span>${label}</span></div>`).join('');
       document.querySelector('#active-run').innerHTML = active ? `<div class="panel active"><h2>${active.state === 'paused' ? 'Your SaaS is paused' : 'Building your SaaS…'}</h2>${badge(active)}<p>Run ID: ${esc(active.id)}</p><p>${esc(active.currentPhase)} · ${esc(active.currentTask || 'Preparing next step')}</p><progress max="100" value="${active.progress}"></progress><p class="metadata">${active.progress}% · Elapsed ${Math.max(0, Math.floor((Date.now() - Date.parse(active.createdAt)) / 60000))} min</p></div>` : '';
       document.querySelector('#autonomous-projects').innerHTML = runs.length ? runs.map(card).join('') : '<p class="muted">Your first app starts here. Generate a SaaS idea and let the pipeline build it.</p>';
@@ -108,7 +108,7 @@ function setupFactory() {
     schedule(refresh, version);
   };
   generate.onclick = async () => {
-    if (starting || !loaded || modeActive || runs.some(run => !terminal(run))) return;
+    if (starting || !loaded || modeActive || runs.some(run => run.blocksNewRun ?? !terminal(run))) return;
     starting = true; generate.disabled = true;
     const message = document.querySelector('#factory-message');
     try {

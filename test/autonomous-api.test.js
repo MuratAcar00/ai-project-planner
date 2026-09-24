@@ -18,6 +18,7 @@ test('autonomous API responds 202 while generation is pending, with duplicate an
   const entered = deferred(); const release = deferred();
   const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
   const f = await serverFixture(t, { ideaProvider: { async generateIdeas(config) { entered.resolve(); await release.promise; return new TemplateIdeaProvider().generateIdeas(config); } } });
+  await f.service.initialize();
   try {
     const response = await f.post('/api/autonomous/start', { requestId: 'api-run', platformPreference: 'web' });
     assert.equal(response.status, 202);
@@ -59,4 +60,32 @@ test('autonomous API rejects shell/path/provider/approval input, cross-origin re
   for (const suffix of ['', '/events']) assert.equal((await fetch(`${f.base}/api/autonomous/missing${suffix}`)).status, 404);
   for (const action of ['pause', 'resume']) assert.equal((await f.post(`/api/autonomous/missing/${action}`)).status, 404);
   assert.equal((await f.dependencies.runRepository.list()).length, 0);
+});
+
+test('manual start ignores preserved non-resumable setup failure but retains active-run protection', async t => {
+  const entered = deferred(); const release = deferred();
+  const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
+  const f = await serverFixture(t, { ideaProvider: { async generateIdeas(config) { entered.resolve(); await release.promise; return new TemplateIdeaProvider().generateIdeas(config); } } });
+  await f.service.initialize();
+  const historical = { id: 'autonomous-old-setup', state: 'paused', needsAttention: true, projectId: null,
+    pendingFailure: { kind: 'setup', category: 'infrastructure', message: 'Flutter package name rejected.' },
+    config: { requestId: 'old-mobile-run', platformPreference: 'mobile' }, platformPreference: 'mobile',
+    codexUsage: { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 }, events: [{ type: 'workspace_setup_failed', reason: 'Flutter package name rejected.' }] };
+  await f.dependencies.runRepository.create(historical);
+  const before = await f.dependencies.runRepository.get(historical.id);
+  try {
+    const started = await f.post('/api/autonomous/start', { requestId: 'new-mobile-run', platformPreference: 'mobile' });
+    assert.equal(started.status, 202);
+    assert.equal((await started.json()).duplicate, false);
+    await entered.promise;
+    assert.deepEqual(await f.dependencies.runRepository.get(historical.id), before);
+    const blocked = await f.post('/api/autonomous/start', { requestId: 'third-run' });
+    assert.equal(blocked.status, 202);
+    const response = await blocked.json();
+    assert.equal(response.duplicate, true);
+    assert.notEqual(response.run.id, historical.id);
+  } finally {
+    release.resolve();
+    await Promise.all([...f.service.jobs.values()]);
+  }
 });

@@ -3,6 +3,7 @@ const labels = { idle: 'Starting', generating_ideas: 'Generating ideas', evaluat
 const text = value => typeof value === 'string' ? value.slice(0, 500) : null;
 const { CODEX_BUDGET } = require('./codex-budget');
 const { projectTargetPlatform } = require('./platform');
+const { blocksNewAutonomousRun } = require('../services/autonomous-project-service');
 const codexUsage = run => Object.fromEntries(['codexCallsTotal', 'buildCalls', 'repairCalls', 'failedCalls'].map(key => [key, Number.isInteger(run.codexUsage?.[key]) && run.codexUsage[key] >= 0 ? run.codexUsage[key] : 0]));
 function runSummary(run, project) {
   const phases = project?.plan?.phases || [];
@@ -19,7 +20,8 @@ function runSummary(run, project) {
     completedTasks: completed, totalTasks: tasks.length, codexUsage: codexUsage(run), codexBudget: CODEX_BUDGET, currentPhase: text(phases.find(phase => phase.tasks.includes(current))?.name) || labels[run.state],
     currentTask: text(current?.title), fixAttempts: run.fixAttempts || 0, createdAt: run.createdAt,
     completedAt: run.completedAt || null, updatedAt: run.updatedAt,
-    canPause: !['paused', 'completed', 'failed'].includes(run.state), canResume: run.state === 'paused' && !attention };
+    canPause: !['paused', 'completed', 'failed'].includes(run.state), canResume: run.state === 'paused' && !attention,
+    blocksNewRun: blocksNewAutonomousRun(run) };
 }
 function eventSummary(event, run, project) {
   const task = project?.plan?.phases.flatMap(phase => phase.tasks).find(task => task.id === event.taskId);

@@ -145,6 +145,23 @@ test('Flutter scaffold setup failure pauses as infrastructure before execution w
   assert.ok(paused.events.some(event => event.type === 'workspace_setup_failed'));
 });
 
+test('manual start preserves but does not treat non-resumable setup failure as active', async t => {
+  const f = await fixture(t);
+  await f.service.initialize();
+  const historical = { id: 'autonomous-old-setup', state: 'paused', needsAttention: true, projectId: null,
+    pendingFailure: { kind: 'setup', category: 'infrastructure', message: 'Flutter package name rejected.' },
+    config: { requestId: 'old-mobile-run' }, events: [{ type: 'workspace_setup_failed', reason: 'Flutter package name rejected.' }] };
+  await f.dependencies.runRepository.create(historical);
+  const before = await f.dependencies.runRepository.get(historical.id);
+  const started = await f.service.start({ requestId: 'fresh-run', platformPreference: 'web' });
+  assert.equal(started.duplicate, false);
+  assert.deepEqual(await f.dependencies.runRepository.get(historical.id), before);
+  await finish(f.service, started.run.id);
+  const duplicate = await f.service.start({ requestId: 'another-run' });
+  assert.equal(duplicate.duplicate, false);
+  assert.deepEqual(await f.dependencies.runRepository.get(historical.id), before);
+});
+
 test('task failure is repaired before the failed task and dependent tasks retry', async t => {
   let failed = false;
   const f = await fixture(t, { execute(task) { if (!failed) { failed = true; throw new Error('implementation error'); } return { success: true }; } });

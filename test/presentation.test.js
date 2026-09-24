@@ -14,6 +14,11 @@ test('safe run summaries map every lifecycle state and expose only appropriate c
   const attention = runSummary({ state: 'paused', needsAttention: true });
   assert.equal(attention.label, 'Needs Attention');
   assert.equal(attention.canResume, false);
+  assert.equal(attention.blocksNewRun, true);
+  const staleSetupFailure = runSummary({ state: 'paused', needsAttention: true, projectId: null, pendingFailure: { kind: 'setup' } });
+  assert.equal(staleSetupFailure.blocksNewRun, false);
+  assert.equal(runSummary({ state: 'paused', needsAttention: false }).blocksNewRun, true);
+  assert.equal(runSummary({ state: 'executing' }).blocksNewRun, true);
 });
 
 test('summaries resolve current phase/task and timeline without serializing evidence', () => {
