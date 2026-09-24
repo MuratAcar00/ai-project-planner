@@ -12,4 +12,6 @@ test('single-project dashboard offers only the four safe platform preferences an
   assert.match(source, /document\.querySelector\('#platform-preference'\)\.value/);
   assert.match(source, /JSON\.stringify\(\{ requestId, platformPreference \}\)/);
   assert.match(source, /run\.blocksNewRun \?\? !terminal\(run\)/);
+  assert.match(source, /run\.canAbandon[\s\S]*data-action="abandon"/);
+  assert.match(source, /window\.confirm\('Abandon this paused run\?/);
 });

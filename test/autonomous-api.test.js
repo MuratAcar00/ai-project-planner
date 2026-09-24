@@ -58,8 +58,32 @@ test('autonomous API rejects shell/path/provider/approval input, cross-origin re
   assert.equal((await fetch(`${f.base}/api/autonomous/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{' })).status, 400);
   assert.equal((await fetch(`${f.base}/api/autonomous/start`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: 'a'.repeat(110000) }) })).status, 413);
   for (const suffix of ['', '/events']) assert.equal((await fetch(`${f.base}/api/autonomous/missing${suffix}`)).status, 404);
-  for (const action of ['pause', 'resume']) assert.equal((await f.post(`/api/autonomous/missing/${action}`)).status, 404);
+  for (const action of ['pause', 'resume', 'abandon']) assert.equal((await f.post(`/api/autonomous/missing/${action}`)).status, 404);
   assert.equal((await f.dependencies.runRepository.list()).length, 0);
+});
+
+test('manual abandon endpoint requires settled paused run and preserves its history', async t => {
+  const f = await serverFixture(t);
+  await f.service.initialize();
+  const paused = { id: 'manual-abandon', state: 'paused', resumeState: 'executing', projectId: null, needsAttention: false,
+    codexUsage: { codexCallsTotal: 2, buildCalls: 1, repairCalls: 1, failedCalls: 0 },
+    events: [{ id: 'before', type: 'run_paused', timestamp: '2026-01-01T00:00:00.000Z', runId: 'manual-abandon', reason: 'Paused by user.' }] };
+  await f.dependencies.runRepository.create(paused);
+  const before = await f.dependencies.runRepository.get(paused.id);
+  const response = await f.post(`/api/autonomous/${paused.id}/abandon`);
+  assert.equal(response.status, 202);
+  const dto = await response.json();
+  assert.equal(dto.state, 'abandoned');
+  assert.equal(dto.blocksNewRun, false);
+  assert.equal(dto.canResume, false);
+  assert.equal(dto.canPause, false);
+  const stored = await f.dependencies.runRepository.get(paused.id);
+  assert.equal(stored.state, 'abandoned');
+  assert.deepEqual(stored.codexUsage, before.codexUsage);
+  assert.deepEqual(stored.events[0], before.events[0]);
+  assert.equal(stored.events.at(-1).type, 'run_abandoned');
+  await f.dependencies.runRepository.create({ id: 'active-manual-run', state: 'executing', projectId: null, events: [], codexUsage: {} });
+  assert.equal((await f.post('/api/autonomous/active-manual-run/abandon')).status, 409);
 });
 
 test('manual start ignores preserved non-resumable setup failure but retains active-run protection', async t => {

@@ -162,6 +162,34 @@ test('manual start preserves but does not treat non-resumable setup failure as a
   assert.deepEqual(await f.dependencies.runRepository.get(historical.id), before);
 });
 
+test('abandon preserves paused manual run evidence and rejects active or Needs Attention runs', async t => {
+  const f = await fixture(t);
+  await f.service.initialize();
+  const seed = (id, state = 'paused', extra = {}) => ({ id, state, projectId: null, config: { requestId: `${id}-request` },
+    codexUsage: { codexCallsTotal: 2, buildCalls: 1, repairCalls: 1, failedCalls: 0 }, events: [{ type: 'run_paused', reason: 'Paused by user.' }], ...extra });
+  await f.dependencies.runRepository.create(seed('manual-paused'));
+  const before = await f.dependencies.runRepository.get('manual-paused');
+  const abandoned = await f.service.abandon('manual-paused');
+  assert.equal(abandoned.state, 'abandoned');
+  assert.deepEqual(abandoned.codexUsage, before.codexUsage);
+  assert.deepEqual(abandoned.events.slice(0, before.events.length), before.events);
+  assert.equal(abandoned.events.at(-1).type, 'run_abandoned');
+  assert.equal((await f.dependencies.runRepository.get('manual-paused')).state, 'abandoned');
+  await f.dependencies.runRepository.create(seed('manual-running', 'executing'));
+  await assert.rejects(() => f.service.abandon('manual-running'), { status: 409 });
+  await f.dependencies.runRepository.create(seed('manual-needs-attention', 'paused', { needsAttention: true }));
+  await assert.rejects(() => f.service.abandon('manual-needs-attention'), { status: 409 });
+  await f.dependencies.runRepository.create(seed('manual-job'));
+  f.service.jobs.set('manual-job', Promise.resolve());
+  await assert.rejects(() => f.service.abandon('manual-job'), { status: 409 });
+  f.service.jobs.delete('manual-job');
+  await f.dependencies.projectRepository.create({ id: 'project-with-job', plan: { phases: [] }, runs: [{ id: 'codex-job', status: 'running' }] });
+  await f.dependencies.runRepository.create(seed('manual-execution-job', 'paused', { projectId: 'project-with-job' }));
+  f.dependencies.executionService.jobs.set('codex-job', Promise.resolve());
+  await assert.rejects(() => f.service.abandon('manual-execution-job'), { status: 409 });
+  f.dependencies.executionService.jobs.delete('codex-job');
+});
+
 test('task failure is repaired before the failed task and dependent tasks retry', async t => {
   let failed = false;
   const f = await fixture(t, { execute(task) { if (!failed) { failed = true; throw new Error('implementation error'); } return { success: true }; } });

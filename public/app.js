@@ -14,10 +14,10 @@ let routeVersion = 0;
 let busy = false;
 let starting = false;
 const post = url => api(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-const terminal = run => ['completed', 'failed'].includes(run.state);
+const terminal = run => ['completed', 'failed', 'abandoned'].includes(run.state);
 function badge(run) { return `<span class="pill ${run.needsAttention || run.state === 'failed' ? 'attention' : ''}">${esc(run.label)}</span>`; }
 function controls(run) {
-  return `<div class="actions"><a class="button secondary" href="#/run/${encodeURIComponent(run.id)}">View Progress</a>${run.canPause ? `<button data-run="${esc(run.id)}" data-action="pause">Pause</button>` : ''}${run.canResume ? `<button data-run="${esc(run.id)}" data-action="resume">Resume</button>` : ''}</div>${run.needsAttention ? '<p class="metadata">Operator review required. Infrastructure recovery is available only to a trusted server operator.</p>' : ''}`;
+  return `<div class="actions"><a class="button secondary" href="#/run/${encodeURIComponent(run.id)}">View Progress</a>${run.canPause ? `<button data-run="${esc(run.id)}" data-action="pause">Pause</button>` : ''}${run.canResume ? `<button data-run="${esc(run.id)}" data-action="resume">Resume</button>` : ''}${run.canAbandon ? `<button data-run="${esc(run.id)}" data-action="abandon">Abandon</button>` : ''}</div>${run.needsAttention ? '<p class="metadata">Operator review required. Infrastructure recovery is available only to a trusted server operator.</p>' : ''}`;
 }
 function card(run) {
   const usage = run.codexUsage || { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 };
@@ -70,6 +70,7 @@ function bindControls(refresh) {
       const message = document.querySelector('#factory-message');
       message.textContent = button.dataset.runtimeAction === 'start' ? 'Starting app and checking readiness…' : 'Updating…';
       try {
+        if (button.dataset.action === 'abandon' && !window.confirm('Abandon this paused run? Its project and run history will be preserved.')) return;
         await post(button.dataset.run ? `/api/autonomous/${encodeURIComponent(button.dataset.run)}/${button.dataset.action}` : `/api/projects/${encodeURIComponent(button.dataset.project)}/runtime/${button.dataset.runtimeAction}`);
         message.textContent = 'Updated successfully.';
       } catch (error) { message.textContent = error.message; }

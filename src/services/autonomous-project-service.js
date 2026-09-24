@@ -8,7 +8,7 @@ const { failureFingerprint, workspaceFingerprint } = require('../autonomous/repa
 const { chooseTargetPlatform } = require('../autonomous/platform');
 const { FlutterWorkspaceScaffolder } = require('./flutter-workspace-scaffolder');
 
-const terminal = state => ['completed', 'failed'].includes(state);
+const terminal = state => ['completed', 'failed', 'abandoned'].includes(state);
 const blocksNewAutonomousRun = run => !terminal(run.state) && !(run.state === 'paused' && run.needsAttention && run.pendingFailure?.kind === 'setup' && !run.projectId);
 const PLATFORM_PREFERENCES = ['auto', 'web', 'mobile', 'web_mobile'];
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
@@ -118,6 +118,32 @@ class AutonomousProjectService {
       });
       this.launch(id);
       return result;
+    });
+  }
+  async abandon(id) {
+    await this.initialize();
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run) return null;
+      if (run.state !== 'paused' || run.needsAttention) throw Object.assign(new Error('Only a paused manual run without Needs Attention can be abandoned.'), { status: 409 });
+      if (this.jobs.has(id)) throw Object.assign(new Error('Wait for the paused run operation to settle before abandoning it.'), { status: 409 });
+      if (run.projectId) {
+        const project = await this.projectRepository.get(run.projectId);
+        const activeTasks = project && (allTasks(project).some(task => task.status === 'running')
+          || (project.runs || []).some(execution => execution.status === 'running'));
+        if (activeTasks) throw Object.assign(new Error('Wait for active task execution to settle before abandoning the run.'), { status: 409 });
+        if (project && (project.runs || []).some(execution => this.executionService.jobs?.has(execution.id))) {
+          throw Object.assign(new Error('Wait for active task execution to settle before abandoning the run.'), { status: 409 });
+        }
+      }
+      return this.runRepository.update(id, stored => {
+        if (stored.state !== 'paused' || stored.needsAttention) throw Object.assign(new Error('Only a paused manual run without Needs Attention can be abandoned.'), { status: 409 });
+        stored.state = 'abandoned';
+        stored.abandonedAt = new Date().toISOString();
+        stored.updatedAt = stored.abandonedAt;
+        event(stored, 'run_abandoned');
+        return true;
+      });
     });
   }
   // Trusted operator entry point. The caller must complete a real provider smoke test first.

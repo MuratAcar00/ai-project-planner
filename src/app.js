@@ -55,7 +55,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     autonomousService: autonomous, projectRepository: repository, publisher, executionService: execution
   });
   app.locals.autonomousMode = mode;
-  const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null);
+  const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null, { manual: await mode.isManualRun(run.id) });
   const ready = Promise.all([execution.initialize(), autonomous.initialize(), mode.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
@@ -113,7 +113,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       res.json(run.events.map(event => eventSummary(event, run, project)));
     } catch (error) { next(error); }
   });
-  for (const action of ['pause', 'resume']) app.post(`/api/autonomous/:id/${action}`, async (req, res, next) => {
+  for (const action of ['pause', 'resume', 'abandon']) app.post(`/api/autonomous/:id/${action}`, async (req, res, next) => {
     try {
       if (req.body && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) return res.status(400).json({ error: 'This action takes no configuration.' });
       const current = await autonomous.runRepository.get(req.params.id);
@@ -122,7 +122,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       if (!run) return res.status(404).json({ error: 'Autonomous run not found.' });
       res.status(202).json(await present(run));
     } catch (error) {
-      if (error.message.startsWith('Run must be paused')) return res.status(409).json({ error: error.message });
+      if (error.status === 409 || error.message.startsWith('Run must be paused')) return res.status(409).json({ error: error.message });
       next(error);
     }
   });

@@ -2,7 +2,7 @@ const { makeId } = require('../domain');
 const { runSummary } = require('../autonomous/presentation');
 
 const finished = status => ['stopped', 'completed'].includes(status);
-const terminal = run => ['completed', 'failed'].includes(run.state);
+const terminal = run => ['completed', 'failed', 'abandoned'].includes(run.state);
 const fail = (message, status = 409) => Object.assign(new Error(message), { status, safeSessionError: true });
 function validateSessionConfig(input = {}) {
   if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).some(key => !['maxProjects', 'stopOnNeedsAttention', 'autoPublish'].includes(key))) throw fail('Only maxProjects, stopOnNeedsAttention and autoPublish are supported.', 400);
@@ -135,9 +135,14 @@ class AutonomousModeService {
     return this.serialize(async () => {
       if (await this.active()) throw fail('Use Autonomous Mode controls while a session is active.');
       const run = await this.autonomousService.runRepository.get(id);
+      if (action === 'abandon' && !await this.isManualRun(id)) throw fail('Only manual autonomous runs can be abandoned.');
       if (action === 'resume' && run?.needsAttention) throw fail('Needs Attention: trusted operator review is required.');
       return this.autonomousService[action](id);
     });
+  }
+  async isManualRun(runId) {
+    return !(await this.sessionRepository.list()).some(session => session.currentRunId === runId
+      || session.projects?.some(project => project.runId === runId));
   }
   async request(action) {
     await this.initialize();

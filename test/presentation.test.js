@@ -3,18 +3,22 @@ const assert = require('node:assert/strict');
 const { runSummary, eventSummary } = require('../src/autonomous/presentation');
 
 test('safe run summaries map every lifecycle state and expose only appropriate controls', () => {
-  const states = { generating_ideas: 'Generating ideas', evaluating: 'Checking previous projects / Evaluating candidates', planning: 'Planning', executing: 'Building', testing: 'Testing', fixing: 'Fixing', paused: 'Paused', completed: 'Completed', failed: 'Failed' };
+  const states = { generating_ideas: 'Generating ideas', evaluating: 'Checking previous projects / Evaluating candidates', planning: 'Planning', executing: 'Building', testing: 'Testing', fixing: 'Fixing', paused: 'Paused', completed: 'Completed', failed: 'Failed', abandoned: 'Abandoned' };
   for (const [state, label] of Object.entries(states)) {
     const dto = runSummary({ id: 'run', state, error: 'private', pendingFailure: { output: 'private' } });
     assert.equal(dto.label, label);
     assert.equal(dto.canResume, state === 'paused');
-    assert.equal(dto.canPause, !['paused', 'completed', 'failed'].includes(state));
+    assert.equal(dto.canPause, !['paused', 'completed', 'failed', 'abandoned'].includes(state));
+    if (state === 'abandoned') assert.equal(dto.blocksNewRun, false);
     assert.equal(JSON.stringify(dto).includes('private'), false);
   }
   const attention = runSummary({ state: 'paused', needsAttention: true });
   assert.equal(attention.label, 'Needs Attention');
   assert.equal(attention.canResume, false);
   assert.equal(attention.blocksNewRun, true);
+  assert.equal(attention.canAbandon, false);
+  assert.equal(runSummary({ state: 'paused' }).canAbandon, false);
+  assert.equal(runSummary({ state: 'paused' }, null, { manual: true }).canAbandon, true);
   const staleSetupFailure = runSummary({ state: 'paused', needsAttention: true, projectId: null, pendingFailure: { kind: 'setup' } });
   assert.equal(staleSetupFailure.blocksNewRun, false);
   assert.equal(runSummary({ state: 'paused', needsAttention: false }).blocksNewRun, true);
