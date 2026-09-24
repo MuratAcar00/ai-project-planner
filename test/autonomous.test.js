@@ -12,6 +12,7 @@ const { allTasks } = require('../src/services/execution-service');
 const { createTask, createPhase, createPlan } = require('../src/domain');
 const { CodexExecutionProvider } = require('../src/providers/codex-execution-provider');
 const { failureFingerprint, workspaceFingerprint } = require('../src/autonomous/repair-progress');
+const { chooseTargetPlatform, projectTargetPlatform } = require('../src/autonomous/platform');
 
 test('idea provider produces multiple complete independent candidates', async () => {
   const provider = new TemplateIdeaProvider();
@@ -21,6 +22,21 @@ test('idea provider produces multiple complete independent candidates', async ()
   ideas[0].coreFeatures.push('mutation');
   assert.equal((await provider.generateIdeas())[0].coreFeatures.length, 4);
   await assert.rejects(() => provider.generateIdeas({ candidateCount: 20 }));
+});
+
+test('autonomous platform choice follows idea workflow and legacy projects default to web', () => {
+  assert.equal(chooseTargetPlatform({ targetUser: 'Small product teams', problem: 'Decisions are lost between meetings', solution: 'Capture decisions and alternatives', coreFeatures: ['Search dashboard'] }), 'web');
+  assert.equal(chooseTargetPlatform({ targetUser: 'Independent tutors', problem: 'Lesson feedback is scattered', solution: 'Record observations and practice', coreFeatures: ['Track lessons'] }), 'mobile');
+  assert.equal(chooseTargetPlatform({ targetUser: 'Field service teams', problem: 'Equipment repairs are missed', solution: 'Schedule service in a shared dashboard', coreFeatures: ['Track maintenance'] }), 'web_mobile');
+  assert.equal(projectTargetPlatform({}), 'web');
+  assert.equal(projectTargetPlatform({ targetPlatform: 'invalid' }), 'web');
+});
+
+test('run summaries expose the selected target platform with a legacy web fallback', () => {
+  const { runSummary } = require('../src/autonomous/presentation');
+  const run = { id: 'run-summary', state: 'planning', selection: { selected: { name: 'Example', targetPlatform: 'mobile', oneLinePitch: 'A mobile workflow' } } };
+  assert.equal(runSummary(run, null).targetPlatform, 'mobile');
+  assert.equal(runSummary({ ...run, selection: null }, {}).targetPlatform, 'web');
 });
 
 test('evaluation scores feasibility plus novelty and diversity criteria, excludes paid/external ideas and breaks ties deterministically', async () => {
@@ -54,6 +70,8 @@ test('successful run creates requirements and plan, executes dependencies, valid
   assert.equal(project.requirements.items.length, 4);
   assert.equal(project.plan.provider, 'autonomous');
   assert.equal(project.autonomousRunId, done.id);
+  assert.equal(project.targetPlatform, done.selection.selected.targetPlatform);
+  assert.ok(['web', 'mobile', 'web_mobile'].includes(project.targetPlatform));
   const tasks = allTasks(project);
   assert.deepEqual(f.calls, tasks.map(task => task.id));
   assert.ok(tasks.every(task => task.completed && task.startedAt && task.completedAt));

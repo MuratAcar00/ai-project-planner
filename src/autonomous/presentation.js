@@ -2,6 +2,7 @@
 const labels = { idle: 'Starting', generating_ideas: 'Generating ideas', evaluating: 'Checking previous projects / Evaluating candidates', planning: 'Planning', executing: 'Building', testing: 'Testing', fixing: 'Fixing', paused: 'Paused', completed: 'Completed', failed: 'Failed' };
 const text = value => typeof value === 'string' ? value.slice(0, 500) : null;
 const { CODEX_BUDGET } = require('./codex-budget');
+const { projectTargetPlatform } = require('./platform');
 const codexUsage = run => Object.fromEntries(['codexCallsTotal', 'buildCalls', 'repairCalls', 'failedCalls'].map(key => [key, Number.isInteger(run.codexUsage?.[key]) && run.codexUsage[key] >= 0 ? run.codexUsage[key] : 0]));
 function runSummary(run, project) {
   const phases = project?.plan?.phases || [];
@@ -10,7 +11,7 @@ function runSummary(run, project) {
   const current = tasks.find(task => task.status === 'running') || tasks.find(task => !task.completed);
   const attention = Boolean(run.needsAttention);
   return { id: run.id, projectId: run.projectId, name: text(project?.name || run.selection?.selected?.name) || 'New SaaS',
-    selectedIdea: text(run.selection?.selected?.oneLinePitch), state: run.state,
+    selectedIdea: text(run.selection?.selected?.oneLinePitch), targetPlatform: projectTargetPlatform(project || { targetPlatform: run.selection?.selected?.targetPlatform }), state: run.state,
     label: attention ? 'Needs Attention' : labels[run.state] || 'Unknown', needsAttention: attention,
     projectStatus: project?.status || 'Planning', progress: tasks.length ? Math.round(completed / tasks.length * 100) : 0,
     completedTasks: completed, totalTasks: tasks.length, codexUsage: codexUsage(run), codexBudget: CODEX_BUDGET, currentPhase: text(phases.find(phase => phase.tasks.includes(current))?.name) || labels[run.state],

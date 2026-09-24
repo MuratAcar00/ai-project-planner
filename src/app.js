@@ -21,11 +21,12 @@ const { ApprovalGate } = require('./services/approval-gate');
 const { WorkspaceValidationService } = require('./services/workspace-validation-service');
 const { AutonomousProjectService, validateStart } = require('./services/autonomous-project-service');
 const { JsonAutonomousRunRepository } = require('./repositories/json-autonomous-run-repository');
+const { projectTargetPlatform } = require('./autonomous/platform');
 
 const summary = project => {
   const tasks = project.plan.phases.flatMap(phase => phase.tasks);
   const completedTasks = tasks.filter(task => task.completed).length;
-  if (project.autonomousRunId) return { id: project.id, name: project.name, autonomousRunId: project.autonomousRunId, status: project.status, createdAt: project.createdAt, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round(completedTasks / tasks.length * 100) : 0 };
+  if (project.autonomousRunId) return { id: project.id, name: project.name, autonomousRunId: project.autonomousRunId, targetPlatform: projectTargetPlatform(project), status: project.status, createdAt: project.createdAt, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round(completedTasks / tasks.length * 100) : 0 };
   return { ...project, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0 };
 };
 

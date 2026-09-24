@@ -5,6 +5,7 @@ const { transition, event } = require('../autonomous/state');
 const { FailureAnalyzer } = require('./failure-analyzer');
 const { CODEX_BUDGET, codexUsage } = require('../autonomous/codex-budget');
 const { failureFingerprint, workspaceFingerprint } = require('../autonomous/repair-progress');
+const { chooseTargetPlatform } = require('../autonomous/platform');
 
 const terminal = state => ['completed', 'failed'].includes(state);
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
@@ -283,7 +284,8 @@ class AutonomousProjectService {
             break;
           }
           await this.move(id, 'evaluating', {}, [['selecting_idea', {}]]);
-          await this.move(id, 'planning', { selection }, [['idea_selected', { ideaId: selection.selected.id, reason: selection.reason, evaluations: selection.evaluations }]]);
+          selection.selected.targetPlatform = chooseTargetPlatform(selection.selected);
+          await this.move(id, 'planning', { selection }, [['idea_selected', { ideaId: selection.selected.id, targetPlatform: selection.selected.targetPlatform, reason: selection.reason, evaluations: selection.evaluations }]]);
           break;
         }
         case 'planning': {
@@ -301,7 +303,7 @@ class AutonomousProjectService {
               }
               project = await this.projectService.createProject({ name: idea.name,
                 description: `${idea.oneLinePitch} Users: ${idea.targetUser}. Problem: ${idea.problem} Solution: ${idea.solution} Features: ${idea.coreFeatures.join('; ')}.`,
-                platform: 'Web', technology: 'JavaScript', experienceLevel: 'Advanced', autonomousRunId: id, idea },
+                platform: 'Web', targetPlatform: idea.targetPlatform || chooseTargetPlatform(idea), technology: 'JavaScript', experienceLevel: 'Advanced', autonomousRunId: id, idea },
               { provider: 'autonomous', requirementItems: idea.coreFeatures.map((text, index) => ({ id: `requirement-${index + 1}`, text, acceptanceCriteria: `User can ${text.toLowerCase()}.` })) });
             }
             await this.workspaceService.getWorkspacePath(project.id);
