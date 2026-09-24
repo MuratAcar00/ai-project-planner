@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const { EventEmitter } = require('node:events');
 const { fixture } = require('./autonomous-helpers');
 const { WorkspaceValidationService, SandboxValidationRunner } = require('../src/services/workspace-validation-service');
@@ -30,7 +31,12 @@ async function flutterValidationFixture(t, result) {
   await fs.mkdir(path.join(workspace, 'android'), { recursive: true });
   await f.dependencies.projectRepository.create({ id: projectId, targetPlatform: 'mobile' });
   const calls = [];
-  const runner = { async run(cwd, command, args) { calls.push({ cwd, command, args }); return result ? result(command, args) : { passed: true, output: 'All tests passed' }; } };
+  const cachePath = path.join(workspace, '.validation', 'fake-flutter-cache');
+  const runner = {
+    async prepareFlutterCache() { await fs.mkdir(cachePath, { recursive: true }); return { path: cachePath }; },
+    async cleanupFlutterCache() { await fs.rm(cachePath, { recursive: true, force: true }); },
+    async run(cwd, command, args, options) { calls.push({ cwd, command, args, options }); return result ? result(command, args) : { passed: true, output: 'All tests passed' }; }
+  };
   const validation = new WorkspaceValidationService({ workspaceService: f.dependencies.workspaceService, projectRepository: f.dependencies.projectRepository, runner });
   return { ...f, workspace, projectId, calls, validation };
 }
@@ -42,6 +48,8 @@ test('mobile validation runs Flutter tests followed by the Android debug APK bui
   assert.deepEqual(result.checks.map(check => check.name), ['flutter-test', 'android-debug-apk']);
   assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['flutter', ['test']], ['flutter', ['build', 'apk', '--debug']]]);
   assert.ok(f.calls.every(call => call.cwd === f.workspace));
+  assert.ok(f.calls.every(call => call.options.flutterCachePath === path.join(f.workspace, '.validation', 'fake-flutter-cache')));
+  assert.equal(await fs.stat(path.join(f.workspace, '.validation', 'fake-flutter-cache')).then(() => true, () => false), false);
 });
 
 test('Flutter generated-code failures remain repairable while toolchain failures are infrastructure', async t => {
@@ -55,6 +63,26 @@ test('Flutter generated-code failures remain repairable while toolchain failures
   assert.equal(infrastructureResult.infrastructureError, true);
   assert.equal(infrastructureResult.checks[0].name, 'flutter-test');
   assert.equal(toolchain.calls.length, 1);
+});
+
+test('Flutter SDK read-only cache/bootstrap errors are classified as infrastructure before APK build', async t => {
+  const f = await flutterValidationFixture(t, () => ({ passed: false, exitCode: 1,
+    output: '/flutter/bin/internal/update_engine_version.sh: line 71: engine.stamp.tmp.14: Read-only file system\nengine.realm: Read-only file system' }));
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.infrastructureError, true);
+  assert.equal(result.checks[0].name, 'flutter-test');
+  assert.equal(result.checks[0].infrastructureError, true);
+  assert.equal(f.calls.length, 1);
+});
+
+test('Flutter SDK cache seeding failure is infrastructure and launches no validation command', async t => {
+  const f = await flutterValidationFixture(t);
+  f.validation.runner.prepareFlutterCache = async () => { throw Object.assign(new Error('read-only SDK cache'), { code: 'EROFS' }); };
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.passed, false);
+  assert.equal(result.infrastructureError, true);
+  assert.equal(result.checks[0].name, 'flutter-sdk-cache');
+  assert.equal(f.calls.length, 0);
 });
 
 test('validation runs offline install, syntax checks, tests and startup health with fixed arguments', async t => {
@@ -143,24 +171,48 @@ test('sandbox runner clears environment and mounts only workspace writable witho
   await assert.rejects(() => runner.run('/tmp', 'sh', []));
 });
 
-test('Flutter validation runner only accepts fixed test and Android APK commands inside the isolated workspace', async () => {
-  let observed;
-  const runner = new SandboxValidationRunner({ flutterExecutable: '/usr/bin/node', spawnProcess(command, args, options) {
-    observed = { command, args, options };
+test('Flutter cache is privately seeded, mounted over the read-only SDK cache for both commands, and cleaned up', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'flutter-cache-sandbox-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  const flutterRoot = path.join(root, 'flutter-sdk');
+  const sourceCache = path.join(flutterRoot, 'bin', 'cache');
+  await fs.mkdir(path.join(workspace, '.validation'), { recursive: true });
+  await fs.mkdir(sourceCache, { recursive: true });
+  await fs.writeFile(path.join(flutterRoot, 'bin', 'flutter'), '#!/bin/sh\n');
+  await fs.writeFile(path.join(sourceCache, 'engine.stamp'), 'installed-engine\n');
+  await fs.writeFile(path.join(sourceCache, 'engine.realm'), '');
+  const invocations = [];
+  const runner = new SandboxValidationRunner({ flutterExecutable: path.join(flutterRoot, 'bin', 'flutter'), spawnProcess(command, args, options) {
+    invocations.push({ command, args, options });
     const process = child();
-    setImmediate(() => { process.stdout.emit('data', 'Flutter test output'); process.emit('close', 0, null); });
+    setImmediate(() => { process.stdout.emit('data', 'Flutter validation output'); process.emit('close', 0, null); });
     return process;
   } });
-  const result = await runner.run('/tmp/flutter-workspace', 'flutter', ['build', 'apk', '--debug']);
-  assert.equal(result.passed, true);
-  assert.equal(observed.command, '/usr/bin/bwrap');
-  assert.ok(observed.args.includes('--unshare-all'));
-  assert.ok(observed.args.some((value, index) => value === '--ro-bind' && observed.args[index + 1] === '/usr' && observed.args[index + 2] === '/usr'));
-  assert.deepEqual(observed.args.slice(-4), ['/usr/bin/node', 'build', 'apk', '--debug']);
-  assert.equal(observed.options.shell, false);
-  assert.equal(observed.options.cwd, '/tmp/flutter-workspace');
-  assert.equal(observed.args.includes('--share-net'), false);
-  await assert.rejects(() => runner.run('/tmp/flutter-workspace', 'flutter', ['build', 'ios']));
+  const cache = await runner.prepareFlutterCache(workspace);
+  assert.equal(await fs.readFile(path.join(cache.path, 'engine.stamp'), 'utf8'), 'installed-engine\n');
+  assert.notEqual(cache.path, sourceCache);
+  await fs.writeFile(path.join(cache.path, 'engine.realm'), 'private-change');
+  assert.equal(await fs.readFile(path.join(sourceCache, 'engine.realm'), 'utf8'), '');
+  for (const args of [['test'], ['build', 'apk', '--debug']]) {
+    assert.equal((await runner.run(workspace, 'flutter', args, { flutterCachePath: cache.path })).passed, true);
+  }
+  assert.equal(invocations.length, 2);
+  for (const invocation of invocations) {
+    assert.equal(invocation.command, '/usr/bin/bwrap');
+    assert.ok(invocation.args.includes('--unshare-all'));
+    assert.ok(invocation.args.some((value, index) => value === '--ro-bind' && invocation.args[index + 1] === flutterRoot && invocation.args[index + 2] === flutterRoot));
+    assert.ok(invocation.args.some((value, index) => value === '--bind' && invocation.args[index + 1] === cache.path && invocation.args[index + 2] === path.join(flutterRoot, 'bin', 'cache')));
+    assert.ok(invocation.args.includes('--bind'));
+    assert.equal(invocation.options.shell, false);
+    assert.equal(invocation.options.cwd, workspace);
+    assert.equal(invocation.args.includes('--share-net'), false);
+  }
+  assert.deepEqual(invocations[0].args.slice(-2), [path.join(flutterRoot, 'bin', 'flutter'), 'test']);
+  assert.deepEqual(invocations[1].args.slice(-4), [path.join(flutterRoot, 'bin', 'flutter'), 'build', 'apk', '--debug']);
+  await runner.cleanupFlutterCache(workspace, cache);
+  assert.equal(await fs.stat(cache.path).then(() => true, () => false), false);
+  await assert.rejects(() => runner.run(workspace, 'flutter', ['build', 'ios'], { flutterCachePath: cache.path }));
 });
 
 test('sandbox absence and timeout fail closed with bounded completion', async () => {

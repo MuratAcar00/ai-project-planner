@@ -2,6 +2,22 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+const FLUTTER_CACHE_INFRASTRUCTURE = /read-only file system|(?:^|\b)EROFS\b|engine\.stamp(?:\.tmp[^\s:]*)?|engine\.realm|flutter.{0,100}(?:sdk )?(?:cache|bootstrap|startup).{0,100}(?:permission denied|read-only|failed|error)|(?:sdk )?(?:cache|bootstrap|startup).{0,100}flutter.{0,100}(?:permission denied|read-only|failed|error)/i;
+const inside = (root, candidate) => candidate.startsWith(`${root}${path.sep}`);
+
+async function inspectFlutterCache(directory) {
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) throw new Error('Flutter SDK cache contains a symbolic link.');
+    const stat = await fs.lstat(target);
+    if (entry.isDirectory()) {
+      await fs.chmod(target, stat.mode | 0o700);
+      await inspectFlutterCache(target);
+    } else if (entry.isFile()) await fs.chmod(target, stat.mode | 0o600);
+    else throw new Error('Flutter SDK cache contains an unsupported file type.');
+  }
+}
+
 // No shell, network, host home, credentials or host writable mounts. Generated
 // tests are executable code, so cwd and command allowlisting alone are not a sandbox.
 class SandboxValidationRunner {
@@ -17,7 +33,33 @@ class SandboxValidationRunner {
     }
     return null;
   }
-  async run(workspace, command, args) {
+  async prepareFlutterCache(workspace) {
+    const flutterPath = await this.resolveFlutterExecutable();
+    if (!flutterPath) throw new Error('Flutter CLI is not installed or not available in the configured server PATH.');
+    const flutterRoot = path.basename(path.dirname(flutterPath)) === 'bin' ? path.dirname(path.dirname(flutterPath)) : path.dirname(flutterPath);
+    const source = path.join(flutterRoot, 'bin', 'cache');
+    const sourceStat = await fs.lstat(source);
+    if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) throw new Error('Flutter SDK cache is missing or unsafe.');
+    const validationRoot = await fs.realpath(path.join(workspace, '.validation'));
+    if (!inside(await fs.realpath(workspace), validationRoot)) throw new Error('Flutter validation cache root is outside the workspace.');
+    const cachePath = await fs.mkdtemp(path.join(validationRoot, 'flutter-bin-cache-'));
+    try {
+      await fs.cp(source, cachePath, { recursive: true, dereference: false, preserveTimestamps: true });
+      await inspectFlutterCache(cachePath);
+      return { path: await fs.realpath(cachePath), flutterRoot };
+    } catch (error) {
+      await fs.rm(cachePath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  async cleanupFlutterCache(workspace, cache) {
+    if (!cache?.path) return;
+    const validationRoot = await fs.realpath(path.join(workspace, '.validation'));
+    const cachePath = await fs.realpath(cache.path);
+    if (!inside(validationRoot, cachePath) || path.basename(cachePath).indexOf('flutter-bin-cache-') !== 0) throw new Error('Refusing to remove a Flutter cache outside the validation workspace.');
+    await fs.rm(cachePath, { recursive: true, force: true });
+  }
+  async run(workspace, command, args, { flutterCachePath = null } = {}) {
     if (!['node', 'npm', 'flutter'].includes(command)) throw new Error('Unsupported validation command.');
     if (command === 'flutter' && !((args.length === 1 && args[0] === 'test') || (args.length === 3 && args[0] === 'build' && args[1] === 'apk' && args[2] === '--debug'))) throw new Error('Unsupported Flutter validation command.');
     const mounts = [];
@@ -28,6 +70,10 @@ class SandboxValidationRunner {
       const flutterPath = await this.resolveFlutterExecutable();
       if (!flutterPath) return { passed: false, infrastructureError: true, error: 'Flutter CLI is not installed or not available in the configured server PATH.' };
       const flutterRoot = path.basename(path.dirname(flutterPath)) === 'bin' ? path.dirname(path.dirname(flutterPath)) : path.dirname(flutterPath);
+      if (!flutterCachePath) return { passed: false, infrastructureError: true, error: 'Flutter validation requires a private SDK cache.' };
+      const workspaceRoot = await fs.realpath(workspace);
+      const privateCache = await fs.realpath(flutterCachePath);
+      if (!inside(workspaceRoot, privateCache) || !(await fs.stat(privateCache)).isDirectory()) return { passed: false, infrastructureError: true, error: 'Flutter SDK cache is outside the controlled workspace.' };
       const javaHome = process.env.JAVA_HOME && path.isAbsolute(process.env.JAVA_HOME) ? process.env.JAVA_HOME : null;
       const androidHome = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT].find(value => value && path.isAbsolute(value)) || null;
       const pubCache = process.env.PUB_CACHE && path.isAbsolute(process.env.PUB_CACHE) ? process.env.PUB_CACHE : path.join(process.env.HOME || '/nonexistent', '.pub-cache');
@@ -35,6 +81,7 @@ class SandboxValidationRunner {
       for (const directory of [...new Set(readonly.filter(Boolean))]) {
         try { if ((await fs.stat(directory)).isDirectory()) mounts.push('--ro-bind', directory, directory); } catch { /* Optional toolchain/cache directory. */ }
       }
+      mounts.push('--bind', privateCache, path.join(flutterRoot, 'bin', 'cache'));
       executable = flutterPath;
       validationPath = ['/usr/bin', '/bin', javaHome && path.join(javaHome, 'bin'), path.join(flutterRoot, 'bin'), androidHome && path.join(androidHome, 'platform-tools'), androidHome && path.join(androidHome, 'cmdline-tools', 'latest', 'bin')].filter(Boolean).join(':');
       flutterEnvironment = [...(javaHome ? ['--setenv', 'JAVA_HOME', javaHome] : []), '--setenv', 'ANDROID_HOME', androidHome || '/nonexistent', '--setenv', 'ANDROID_SDK_ROOT', androidHome || '/nonexistent'];
@@ -200,16 +247,41 @@ class WorkspaceValidationService {
       await fs.mkdir(target, { recursive: true });
       if ((await fs.lstat(target)).isSymbolicLink() || !(await fs.realpath(target)).startsWith(`${workspace}${path.sep}`)) return { passed: false, infrastructureError: true, checks: [{ name: 'flutter-contract', passed: false, error: 'Unsafe Flutter validation directory.', infrastructureError: true }] };
     }
-    for (const [name, args] of [['flutter-test', ['test']], ['android-debug-apk', ['build', 'apk', '--debug']]]) {
-      let result;
-      try { result = await this.runner.run(workspace, 'flutter', args); }
-      catch (error) { result = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
-      if (!result.passed && !result.infrastructureError && /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to download (?:gradle|gradle distribution)|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(result.output || result.error || '')) result.infrastructureError = true;
-      if (name === 'flutter-test' && result.passed && /(?:no tests ran|no tests found)/i.test(result.output || '')) { result.passed = false; result.error = 'Flutter test command did not run any tests.'; }
-      checks.push({ name, ...result });
-      if (!result.passed) return { passed: false, infrastructureError: Boolean(result.infrastructureError), checks };
+    let cache;
+    let outcome;
+    let cleanupError;
+    try {
+      if (this.runner.prepareFlutterCache) cache = await this.runner.prepareFlutterCache(workspace);
+      for (const [name, args] of [['flutter-test', ['test']], ['android-debug-apk', ['build', 'apk', '--debug']]]) {
+        let result;
+        try { result = await this.runner.run(workspace, 'flutter', args, { flutterCachePath: cache?.path || null }); }
+        catch (error) { result = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
+        const evidence = `${result.output || ''}\n${result.error || ''}`;
+        if (!result.passed && FLUTTER_CACHE_INFRASTRUCTURE.test(evidence)) result.infrastructureError = true;
+        if (!result.passed && !result.infrastructureError && /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to download (?:gradle|gradle distribution)|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(evidence)) result.infrastructureError = true;
+        if (name === 'flutter-test' && result.passed && /(?:no tests ran|no tests found)/i.test(result.output || '')) { result.passed = false; result.error = 'Flutter test command did not run any tests.'; }
+        checks.push({ name, ...result });
+        if (!result.passed) {
+          outcome = { passed: false, infrastructureError: Boolean(result.infrastructureError), checks };
+          break;
+        }
+      }
+      if (!outcome) outcome = { passed: true, checks };
+    } catch (error) {
+      const message = String(error.message || error).slice(0, 1000);
+      checks.push({ name: 'flutter-sdk-cache', passed: false, infrastructureError: true, error: message });
+      outcome = { passed: false, infrastructureError: true, checks };
+    } finally {
+      if (cache && this.runner.cleanupFlutterCache) {
+        try { await this.runner.cleanupFlutterCache(workspace, cache); }
+        catch (error) { cleanupError = String(error.message || error).slice(0, 1000); }
+      }
     }
-    return { passed: true, checks };
+    if (cleanupError) {
+      checks.push({ name: 'flutter-sdk-cache-cleanup', passed: false, infrastructureError: true, error: cleanupError });
+      return { passed: false, infrastructureError: true, checks };
+    }
+    return outcome;
   }
 }
 module.exports = { WorkspaceValidationService, SandboxValidationRunner };
