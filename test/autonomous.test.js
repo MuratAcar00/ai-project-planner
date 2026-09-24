@@ -7,6 +7,8 @@ const { ApprovalGate } = require('../src/services/approval-gate');
 const { AutonomousProjectService, validateStart, fixLimit } = require('../src/services/autonomous-project-service');
 const { transition } = require('../src/autonomous/state');
 const { allTasks } = require('../src/services/execution-service');
+const { createTask, createPhase, createPlan } = require('../src/domain');
+const { CodexExecutionProvider } = require('../src/providers/codex-execution-provider');
 
 test('idea provider produces multiple complete independent candidates', async () => {
   const provider = new TemplateIdeaProvider();
@@ -125,6 +127,100 @@ test('Codex metrics deduplicate a process execution ID but count a new attempt f
   await f.service.recordCodexStart('metrics-idempotency-run', 'execution-2', 'build');
   const run = await f.dependencies.runRepository.get('metrics-idempotency-run');
   assert.deepEqual(run.codexUsage, { codexCallsTotal: 2, buildCalls: 2, repairCalls: 0, failedCalls: 1 });
+});
+
+test('Codex budget allows remaining build and repair calls and treats legacy metrics as zero', async t => {
+  const f = await fixture(t);
+  const cases = [
+    ['build-zero', 'build', undefined, true], ['build-two', 'build', { codexCallsTotal: 2, buildCalls: 2, repairCalls: 0, failedCalls: 0 }, true],
+    ['repair-zero', 'repair', undefined, true], ['repair-one', 'repair', { codexCallsTotal: 1, buildCalls: 0, repairCalls: 1, failedCalls: 0 }, true]
+  ];
+  for (const [id, kind, codexUsage, expected] of cases) {
+    await f.dependencies.runRepository.create({ id, state: 'executing', projectId: null, events: [], ...(codexUsage ? { codexUsage } : {}) });
+    assert.equal(await f.service.checkCodexBudget(id, kind), expected);
+  }
+});
+
+test('exhausted Codex build budget blocks before execution and marks run Needs Attention', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  let processAttempts = 0;
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: false, async executeTask() { processAttempts++; return { success: true }; } });
+  f.service.executionProvider = 'codex';
+  const runId = 'build-budget-exhausted', projectId = 'build-budget-project';
+  const task = createTask({ id: 'build-budget-task', title: 'Build' });
+  await f.dependencies.projectRepository.create({ id: projectId, autonomousRunId: runId, status: 'In progress', runs: [], plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [task] })] }) });
+  await f.dependencies.runRepository.create({ id: runId, state: 'executing', projectId, events: [], codexUsage: { codexCallsTotal: 3, buildCalls: 3, repairCalls: 0, failedCalls: 0 } });
+  assert.equal(await f.service.execute(runId, await f.dependencies.projectRepository.get(projectId), task), null);
+  const blocked = await f.dependencies.runRepository.get(runId);
+  assert.equal(processAttempts, 0);
+  assert.deepEqual(blocked.codexUsage, { codexCallsTotal: 3, buildCalls: 3, repairCalls: 0, failedCalls: 0 });
+  assert.equal(blocked.needsAttention, true);
+  assert.equal(blocked.pauseReason, 'Build Codex call budget exhausted');
+  assert.equal(blocked.events.at(-1).type, 'codex_budget_exhausted');
+  assert.equal((await f.dependencies.projectRepository.get(projectId)).status, 'Needs attention');
+});
+
+test('exhausted repair budget pauses before reserving or creating another repair task', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  let processAttempts = 0;
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: false, async executeTask() { processAttempts++; return { success: true }; } });
+  f.service.executionProvider = 'codex';
+  const runId = 'repair-budget-exhausted', projectId = 'repair-budget-project';
+  const task = createTask({ id: 'repair-budget-base', title: 'Build', completed: true });
+  await f.dependencies.projectRepository.create({ id: projectId, autonomousRunId: runId, status: 'In progress', runs: [], plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [task] })] }) });
+  await f.dependencies.runRepository.create({ id: runId, state: 'fixing', projectId, events: [], pendingFailure: { kind: 'task', taskId: task.id },
+    failureAnalysis: { recoverable: true, recommendation: 'Repair it', evidence: 'failed validation' }, fixAttempts: 0, maxFixAttempts: 3,
+    codexUsage: { codexCallsTotal: 2, buildCalls: 0, repairCalls: 2, failedCalls: 0 } });
+  await f.service.drive(runId);
+  const blocked = await f.dependencies.runRepository.get(runId);
+  const project = await f.dependencies.projectRepository.get(projectId);
+  assert.equal(processAttempts, 0);
+  assert.deepEqual(blocked.codexUsage, { codexCallsTotal: 2, buildCalls: 0, repairCalls: 2, failedCalls: 0 });
+  assert.equal(blocked.needsAttention, true);
+  assert.equal(blocked.pauseReason, 'Repair Codex call budget exhausted');
+  assert.equal(blocked.fixAttempts, 0);
+  assert.equal(allTasks(project).filter(candidate => candidate.isFix).length, 0);
+});
+
+test('Codex infrastructure failure before process start consumes no usage budget', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  f.dependencies.executionService.providers.set('codex', new CodexExecutionProvider({ spawnProcess() {
+    throw Object.assign(new Error('mock process unavailable'), { code: 'ENOENT' });
+  } }));
+  f.service.executionProvider = 'codex';
+  const { run } = await f.service.start({ requestId: 'codex-pre-spawn-failure' });
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.needsAttention, true);
+  assert.equal(paused.codexUsage.codexCallsTotal, 0);
+  assert.equal(paused.codexUsage.buildCalls, 0);
+  assert.equal(paused.codexUsage.failedCalls, 0);
+});
+
+test('three actual build attempts complete normally and concurrent attempts cannot oversubscribe the remaining budget', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  let processAttempts = 0;
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: false, async executeTask(task, context) {
+    processAttempts++;
+    await context.onExecutionStart(context.runId);
+    return { success: true };
+  } });
+  f.service.executionProvider = 'codex';
+  const { run } = await f.service.start({ requestId: 'three-build-budget' });
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'completed');
+  assert.equal(processAttempts, 3);
+  assert.deepEqual(done.codexUsage, { codexCallsTotal: 3, buildCalls: 3, repairCalls: 0, failedCalls: 0 });
+
+  const runId = 'concurrent-budget-run', projectId = 'concurrent-budget-project';
+  const tasks = [createTask({ id: 'concurrent-a', title: 'Build A' }), createTask({ id: 'concurrent-b', title: 'Build B' })];
+  await f.dependencies.projectRepository.create({ id: projectId, autonomousRunId: runId, status: 'In progress', runs: [], plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks })] }) });
+  await f.dependencies.runRepository.create({ id: runId, state: 'executing', projectId, events: [], codexUsage: { codexCallsTotal: 2, buildCalls: 2, repairCalls: 0, failedCalls: 0 } });
+  processAttempts = 0;
+  const concurrentProject = await f.dependencies.projectRepository.get(projectId);
+  await Promise.all(tasks.map(task => f.service.execute(runId, concurrentProject, task)));
+  const concurrent = await f.dependencies.runRepository.get(runId);
+  assert.equal(processAttempts, 1);
+  assert.equal(concurrent.codexUsage.buildCalls, 3);
 });
 
 test('validation failure loops through a fix task and revalidation', async t => {

@@ -25,6 +25,7 @@ test('summaries resolve current phase/task and timeline without serializing evid
   assert.equal(dto.progress, 50);
   assert.equal(dto.completedTasks, 1);
   assert.deepEqual(runSummary({ state: 'completed' }).codexUsage, { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 });
+  assert.deepEqual(runSummary({ state: 'completed' }).codexBudget, { buildCalls: 3, repairCalls: 2 });
   assert.deepEqual(runSummary({ state: 'completed', codexUsage: { codexCallsTotal: 2, buildCalls: 1, repairCalls: 1, failedCalls: 1 } }).codexUsage,
     { codexCallsTotal: 2, buildCalls: 1, repairCalls: 1, failedCalls: 1 });
   const event = eventSummary({ id: 'event', type: 'task_started', taskId: 'b', timestamp: '2026-01-01T00:00:00Z', output: 'PRIVATE' }, run, project);

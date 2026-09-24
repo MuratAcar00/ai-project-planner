@@ -3,6 +3,7 @@ const { makeId, createTask, createPhase } = require('../domain');
 const { allTasks } = require('./execution-service');
 const { transition, event } = require('../autonomous/state');
 const { FailureAnalyzer } = require('./failure-analyzer');
+const { CODEX_BUDGET, codexUsage } = require('../autonomous/codex-budget');
 
 const terminal = state => ['completed', 'failed'].includes(state);
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
@@ -383,6 +384,7 @@ class AutonomousProjectService {
           if (!await this.permitted(id, 'workspace_fix')) return;
           let project = await this.projectRepository.get(run.projectId);
           let task = allTasks(project).find(task => task.id === run.activeFixTaskId);
+          if ((!task || !task.completed) && !await this.checkCodexBudget(id, 'repair')) return;
           if (!task) {
             if (!run.activeFixTaskId && run.fixAttempts >= run.maxFixAttempts) { await this.fail(id, 'MAX_FIX_ATTEMPTS exhausted.'); return; }
             const attempt = run.activeFixTaskId ? run.fixAttempts : run.fixAttempts + 1;
@@ -438,8 +440,12 @@ class AutonomousProjectService {
   }
   async execute(id, project, task) {
     if (!await this.permitted(id, this.executionProvider === 'codex' ? 'codex_execution' : 'workspace_code')) return null;
+    let signalSpawned;
+    const spawned = new Promise(resolve => { signalSpawned = resolve; });
     const accepted = await this.serialize(async () => {
-      if ((await this.runRepository.get(id)).state === 'paused') return null;
+      const currentRun = await this.runRepository.get(id);
+      if (!currentRun || currentRun.state === 'paused') return null;
+      if (this.executionProvider === 'codex' && !await this.enforceCodexBudget(currentRun, task.isFix ? 'repair' : 'build')) return null;
       await this.projectRepository.update(project.id, stored => {
         const current = allTasks(stored).find(item => item.id === task.id);
         if (current.completed) throw new Error('Refusing duplicate completed task.');
@@ -447,10 +453,17 @@ class AutonomousProjectService {
         return true;
       });
       const result = await this.executionService.startTask(project, task, { provider: this.executionProvider,
-        executionType: task.isFix ? 'repair' : 'build', onExecutionStart: this.executionProvider === 'codex' ? executionRunId => this.recordCodexStart(id, executionRunId, task.isFix ? 'repair' : 'build') : undefined,
+        executionType: task.isFix ? 'repair' : 'build', onExecutionStart: this.executionProvider === 'codex' ? async executionRunId => {
+          await this.recordCodexStart(id, executionRunId, task.isFix ? 'repair' : 'build');
+          signalSpawned();
+        } : undefined,
         onExecutionFailure: this.executionProvider === 'codex' ? executionRunId => this.recordCodexFailure(id, executionRunId) : undefined });
       if (result.duplicate || result.blocked) throw new Error(result.error);
       await this.runRepository.update(id, run => { event(run, 'task_started', { taskId: task.id, executionRunId: result.run.id }); return true; });
+      if (this.executionProvider === 'codex') {
+        const execution = this.executionService.jobs.get(result.run.id);
+        if (execution) await Promise.race([spawned, execution]);
+      }
       return result;
     });
     if (!accepted) return null;
@@ -462,6 +475,32 @@ class AutonomousProjectService {
       return true;
     });
     return { failed, error: current.error || result?.error, output: current.result };
+  }
+  async enforceCodexBudget(run, type) {
+    const usage = codexUsage(run);
+    const counter = type === 'repair' ? 'repairCalls' : 'buildCalls';
+    if (usage[counter] < CODEX_BUDGET[counter]) return true;
+    const reason = `${type === 'repair' ? 'Repair' : 'Build'} Codex call budget exhausted`;
+    const updated = await this.runRepository.update(run.id, stored => {
+      if (stored.state !== 'paused') {
+        stored.resumeState = stored.state;
+        transition(stored, 'paused');
+      }
+      stored.needsAttention = true;
+      stored.pauseReason = reason;
+      stored.updatedAt = new Date().toISOString();
+      event(stored, 'codex_budget_exhausted', { budgetType: type, reason });
+      return true;
+    });
+    if (updated?.projectId) await this.projectRepository.update(updated.projectId, stored => { stored.status = 'Needs attention'; return true; });
+    return false;
+  }
+  async checkCodexBudget(id, type) {
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run || run.state === 'paused' || terminal(run.state)) return false;
+      return this.enforceCodexBudget(run, type);
+    });
   }
   async recordCodexStart(id, executionRunId, type) {
     return this.runRepository.update(id, run => {
