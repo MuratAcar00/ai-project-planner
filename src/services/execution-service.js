@@ -48,7 +48,7 @@ class ExecutionService {
     return result.run && !result.duplicate ? this.jobs.get(result.run.id) || result : result;
   }
 
-  async startTask(project, task, { provider = 'template', timeoutMs } = {}) {
+  async startTask(project, task, { provider = 'template', timeoutMs, onExecutionStart, onExecutionFailure } = {}) {
     await this.initialize();
     const executor = this.providers.get(provider);
     if (!executor) throw new Error(`Unknown execution provider: ${provider}.`);
@@ -89,7 +89,7 @@ class ExecutionService {
     if (updated === false) throw new Error('Task not found.');
     if (accepted.blocked || accepted.duplicate) return accepted;
     const job = new Promise(resolve => setImmediate(resolve))
-      .then(() => this.runTask(project, task, executor, run, timeoutMs))
+      .then(() => this.runTask(project, task, executor, run, timeoutMs, { onExecutionStart, onExecutionFailure }))
       .catch(() => {
         // Persistent storage failure: report no sensitive provider details.
         console.error('Execution terminal state could not be persisted; restart recovery is required.');
@@ -100,14 +100,14 @@ class ExecutionService {
     return accepted;
   }
 
-  async runTask(project, task, executor, run, timeoutMs) {
+  async runTask(project, task, executor, run, timeoutMs, callbacks = {}) {
     let timer;
     let expired = false;
     try {
       const work = async () => {
         const workspacePath = executor.requiresWorkspace ? await this.resolveWorkspace(project.id) : undefined;
         if (expired) throw new Error('Execution job timed out.');
-        return executor.executeTask(task, { projectId: project.id, runId: run.id, workspacePath, timeoutMs });
+        return executor.executeTask(task, { projectId: project.id, runId: run.id, workspacePath, timeoutMs, ...callbacks });
       };
       const output = await Promise.race([
         work(),

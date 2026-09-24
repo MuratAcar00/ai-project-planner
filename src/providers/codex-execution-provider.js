@@ -106,6 +106,9 @@ class CodexExecutionProvider extends ExecutionProvider {
   runCodex(args, { task, context, timeoutMs, command = 'codex' }) {
     return new Promise((resolve, reject) => {
       let child;
+      let usageStarted = false;
+      let usageFailed = false;
+      let usageWrites = Promise.resolve();
       try {
         child = this.spawnProcess(command, args, { cwd: context.workspacePath, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: this.safeEnvironment() });
       } catch (error) {
@@ -142,11 +145,21 @@ class CodexExecutionProvider extends ExecutionProvider {
         clearTimeout(timeout);
         clearTimeout(forceKill);
         clearTimeout(streamDeadline);
-        const output = result(reason, outputIncomplete);
-        // Release local pipes even when descendants keep their write ends open.
-        child.stdout?.destroy?.();
-        child.stderr?.destroy?.();
-        if (message) reject(new CodexExecutionError(message, output)); else resolve(output);
+        usageWrites.finally(() => {
+          const output = result(reason, outputIncomplete);
+          // Release local pipes even when descendants keep their write ends open.
+          child.stdout?.destroy?.();
+          child.stderr?.destroy?.();
+          if (message) reject(new CodexExecutionError(message, output)); else resolve(output);
+        });
+      };
+      const recordUsage = callback => {
+        usageWrites = usageWrites.then(() => callback?.(context.runId)).catch(() => {});
+      };
+      const recordFailure = () => {
+        if (!usageStarted || usageFailed) return;
+        usageFailed = true;
+        recordUsage(context.onExecutionFailure);
       };
       const requestKill = value => {
         if (exited || settled) return;
@@ -157,6 +170,7 @@ class CodexExecutionProvider extends ExecutionProvider {
         if (settled || terminationReason) return;
         terminationReason = reason;
         terminationMessage = message;
+        recordFailure();
         clearTimeout(timeout);
         // Arm first: even synchronous mock close/error events cannot leave a timer behind.
         forceKill = setTimeout(() => {
@@ -176,6 +190,10 @@ class CodexExecutionProvider extends ExecutionProvider {
         signal = observedSignal;
         clearTimeout(timeout);
       };
+      child.once('spawn', () => {
+        usageStarted = true;
+        recordUsage(context.onExecutionStart);
+      });
       timeout = setTimeout(() => {
         if (settled || exited) return;
         timedOut = true;
@@ -203,6 +221,7 @@ class CodexExecutionProvider extends ExecutionProvider {
       child.once('close', (code, observedSignal) => {
         if (settled) return;
         if (!exited) observeExit(code, observedSignal);
+        if (code !== 0 || observedSignal) recordFailure();
         complete();
       });
     });

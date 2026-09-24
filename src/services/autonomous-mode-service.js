@@ -248,9 +248,11 @@ class AutonomousModeService {
     const session = sessions.find(item => !finished(item.status)) || sessions[0];
     if (!session) return { session: null, active: false };
     const projects = [];
+    let codexCalls = 0;
     for (const slot of session.projects) {
       const run = slot.runId && await this.autonomousService.runRepository.get(slot.runId);
       const project = run?.projectId && await this.projectRepository.get(run.projectId);
+      codexCalls += Number.isInteger(run?.codexUsage?.codexCallsTotal) ? run.codexUsage.codexCallsTotal : 0;
       projects.push({ runId: slot.runId, projectId: run?.projectId || slot.projectId, name: project?.name?.slice(0, 100) || 'New SaaS', status: slot.status, publishStatus: slot.publishStatus });
     }
     const run = session.currentRunId && await this.autonomousService.runRepository.get(session.currentRunId);
@@ -260,7 +262,8 @@ class AutonomousModeService {
       maxProjects: session.maxProjects, completedProjects: session.completedProjects, failedProjects: session.failedProjects,
       currentRunId: session.currentRunId, currentProjectId: session.currentProjectId, stopOnNeedsAttention: session.stopOnNeedsAttention,
       autoPublish: session.autoPublish, lastError: session.lastError, progress: Math.round(session.completedProjects / session.maxProjects * 100),
-      current: run ? runSummary(run, project) : null, projects,
+      current: run ? runSummary(run, project) : null, projects, codexCalls,
+      averageCallsPerProject: session.projects.length ? Number((codexCalls / session.projects.length).toFixed(1)) : 0,
       nextAction: session.status === 'running' ? (this.publishJob ? 'Wait for publishing' : 'Continue current project, then the next unique idea') : session.status === 'pausing' || session.status === 'stopping' ? 'Wait for the current operation to reach a safe checkpoint' : 'Wait for user action'
     } };
   }

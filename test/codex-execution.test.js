@@ -113,6 +113,47 @@ test('CodexExecutionProvider records non-zero and timeout failures with captured
   );
 });
 
+test('Codex usage callbacks count spawned process attempts once, including a second attempt for the same task', async t => {
+  const directory = await temporaryDirectory();
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const callbacks = [];
+  let childNumber = 0;
+  const provider = new CodexExecutionProvider({ spawnProcess() {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    const number = ++childNumber;
+    setImmediate(() => { child.emit('spawn'); child.emit('spawn'); child.emit('close', 0, null); });
+    return child;
+  } });
+  for (const runId of ['execution-build-1', 'execution-repair-1', 'execution-build-2']) {
+    await provider.executeTask(task, { projectId: 'project', runId, workspacePath: directory,
+      onExecutionStart: executionRunId => callbacks.push(executionRunId) });
+  }
+  assert.deepEqual(callbacks, ['execution-build-1', 'execution-repair-1', 'execution-build-2']);
+  assert.equal(childNumber, 3);
+});
+
+test('Codex usage ignores pre-spawn failure and records one failure for a started nonzero process', async t => {
+  const directory = await temporaryDirectory();
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const started = [], failed = [];
+  const unavailable = new CodexExecutionProvider({ spawnProcess() { throw new Error('before spawn'); } });
+  await assert.rejects(() => unavailable.executeTask(task, { projectId: 'project', runId: 'pre-spawn', workspacePath: directory,
+    onExecutionStart: id => started.push(id), onExecutionFailure: id => failed.push(id) }));
+  assert.deepEqual(started, []);
+  assert.deepEqual(failed, []);
+
+  const nonzero = new CodexExecutionProvider({ spawnProcess() {
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+    setImmediate(() => { child.emit('spawn'); child.emit('close', 2, null); });
+    return child;
+  } });
+  await assert.rejects(() => nonzero.executeTask(task, { projectId: 'project', runId: 'nonzero', workspacePath: directory,
+    onExecutionStart: id => started.push(id), onExecutionFailure: id => failed.push(id) }));
+  assert.deepEqual(started, ['nonzero']);
+  assert.deepEqual(failed, ['nonzero']);
+});
+
 test('ExecutionService selects Codex safely and keeps the template provider working', async t => {
   const directory = await temporaryDirectory();
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

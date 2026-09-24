@@ -77,6 +77,56 @@ test('task failure is repaired before the failed task and dependent tasks retry'
   assert.equal(project.runs.filter(run => run.status === 'failed').length, 1);
 });
 
+test('Codex usage counts only started Codex build and repair attempts and survives repository reload', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }),
+    execute(task) {
+      return task.isFix ? { success: false } : { success: true };
+    },
+    validate(count) { return { passed: count > 1, checks: [{ name: 'fake', passed: count > 1 }] }; } });
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: true, async executeTask(task, context) {
+      context.onExecutionStart(context.runId);
+      if (task.isFix) context.onExecutionFailure(context.runId);
+      return task.isFix ? { success: false } : { success: true };
+  } });
+  const planner = f.dependencies.projectService.plannerService.providers.get('autonomous');
+  const generatePlan = planner.generatePlan.bind(planner);
+  planner.generatePlan = async input => {
+    const plan = await generatePlan(input);
+    plan.phases = plan.phases.slice(0, 1);
+    plan.phases[0].tasks[0].dependencies = [];
+    return plan;
+  };
+  f.dependencies.executionProvider = 'codex';
+  f.service.executionProvider = 'codex';
+  const started = await f.service.start({ requestId: 'usage-metrics' });
+  const done = await finish(f.service, started.run.id);
+  const reloaded = new (require('../src/repositories/json-autonomous-run-repository').JsonAutonomousRunRepository)(f.dependencies.runRepository.filePath);
+  const persisted = await reloaded.get(done.id);
+  assert.equal(persisted.codexUsage.codexCallsTotal, 2);
+  assert.equal(persisted.codexUsage.buildCalls, 1);
+  assert.equal(persisted.codexUsage.repairCalls, 1);
+  assert.equal(persisted.codexUsage.failedCalls, 1);
+});
+
+test('fake execution provider and deterministic validation do not count as Codex usage', async t => {
+  const f = await fixture(t);
+  const started = await f.service.start({ requestId: 'no-codex-usage' });
+  const done = await finish(f.service, started.run.id);
+  assert.deepEqual(done.codexUsage, { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 });
+});
+
+test('Codex metrics deduplicate a process execution ID but count a new attempt for the same task', async t => {
+  const f = await fixture(t);
+  await f.dependencies.runRepository.create({ id: 'metrics-idempotency-run', state: 'executing', codexUsage: { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 } });
+  await f.service.recordCodexStart('metrics-idempotency-run', 'execution-1', 'build');
+  await f.service.recordCodexStart('metrics-idempotency-run', 'execution-1', 'build');
+  await f.service.recordCodexFailure('metrics-idempotency-run', 'execution-1');
+  await f.service.recordCodexFailure('metrics-idempotency-run', 'execution-1');
+  await f.service.recordCodexStart('metrics-idempotency-run', 'execution-2', 'build');
+  const run = await f.dependencies.runRepository.get('metrics-idempotency-run');
+  assert.deepEqual(run.codexUsage, { codexCallsTotal: 2, buildCalls: 2, repairCalls: 0, failedCalls: 1 });
+});
+
 test('validation failure loops through a fix task and revalidation', async t => {
   const f = await fixture(t, { validate: count => ({ passed: count > 1, checks: [{ name: 'tests', passed: count > 1, error: 'expected 2' }] }) });
   const { run } = await f.service.start();

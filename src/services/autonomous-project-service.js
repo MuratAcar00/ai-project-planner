@@ -67,6 +67,7 @@ class AutonomousProjectService {
       const now = new Date().toISOString();
       const run = { id: makeId('autonomous'), state: 'idle', projectId: null, config, maxFixAttempts: this.maxFixAttempts,
         fixAttempts: 0, ideas: null, selection: null, pendingFailure: null, activeFixTaskId: null,
+        codexUsage: { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 }, codexExecutionAttempts: [],
         validationResults: [], events: [], createdAt: now, updatedAt: now };
       event(run, 'run_created');
       await this.runRepository.create(run);
@@ -445,7 +446,9 @@ class AutonomousProjectService {
         current.status = 'ready';
         return true;
       });
-      const result = await this.executionService.startTask(project, task, { provider: this.executionProvider });
+      const result = await this.executionService.startTask(project, task, { provider: this.executionProvider,
+        executionType: task.isFix ? 'repair' : 'build', onExecutionStart: this.executionProvider === 'codex' ? executionRunId => this.recordCodexStart(id, executionRunId, task.isFix ? 'repair' : 'build') : undefined,
+        onExecutionFailure: this.executionProvider === 'codex' ? executionRunId => this.recordCodexFailure(id, executionRunId) : undefined });
       if (result.duplicate || result.blocked) throw new Error(result.error);
       await this.runRepository.update(id, run => { event(run, 'task_started', { taskId: task.id, executionRunId: result.run.id }); return true; });
       return result;
@@ -459,6 +462,26 @@ class AutonomousProjectService {
       return true;
     });
     return { failed, error: current.error || result?.error, output: current.result };
+  }
+  async recordCodexStart(id, executionRunId, type) {
+    return this.runRepository.update(id, run => {
+      run.codexUsage ||= { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 };
+      run.codexExecutionAttempts ||= [];
+      if (run.codexExecutionAttempts.includes(executionRunId)) return true;
+      run.codexExecutionAttempts.push(executionRunId);
+      run.codexUsage.codexCallsTotal++;
+      run.codexUsage[type === 'repair' ? 'repairCalls' : 'buildCalls']++;
+      return true;
+    });
+  }
+  async recordCodexFailure(id, executionRunId) {
+    return this.runRepository.update(id, run => {
+      if (!run.codexExecutionAttempts?.includes(executionRunId)) return true;
+      run.codexUsage ||= { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 };
+      const failures = run.codexExecutionFailures ||= [];
+      if (!failures.includes(executionRunId)) { failures.push(executionRunId); run.codexUsage.failedCalls++; }
+      return true;
+    });
   }
 }
 module.exports = { AutonomousProjectService, validateStart, fixLimit };

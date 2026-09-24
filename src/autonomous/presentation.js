@@ -1,6 +1,7 @@
 // Explicit browser DTOs: never spread persisted execution/validation records.
 const labels = { idle: 'Starting', generating_ideas: 'Generating ideas', evaluating: 'Checking previous projects / Evaluating candidates', planning: 'Planning', executing: 'Building', testing: 'Testing', fixing: 'Fixing', paused: 'Paused', completed: 'Completed', failed: 'Failed' };
 const text = value => typeof value === 'string' ? value.slice(0, 500) : null;
+const codexUsage = run => Object.fromEntries(['codexCallsTotal', 'buildCalls', 'repairCalls', 'failedCalls'].map(key => [key, Number.isInteger(run.codexUsage?.[key]) && run.codexUsage[key] >= 0 ? run.codexUsage[key] : 0]));
 function runSummary(run, project) {
   const phases = project?.plan?.phases || [];
   const tasks = phases.flatMap(phase => phase.tasks);
@@ -11,7 +12,7 @@ function runSummary(run, project) {
     selectedIdea: text(run.selection?.selected?.oneLinePitch), state: run.state,
     label: attention ? 'Needs Attention' : labels[run.state] || 'Unknown', needsAttention: attention,
     projectStatus: project?.status || 'Planning', progress: tasks.length ? Math.round(completed / tasks.length * 100) : 0,
-    completedTasks: completed, totalTasks: tasks.length, currentPhase: text(phases.find(phase => phase.tasks.includes(current))?.name) || labels[run.state],
+    completedTasks: completed, totalTasks: tasks.length, codexUsage: codexUsage(run), currentPhase: text(phases.find(phase => phase.tasks.includes(current))?.name) || labels[run.state],
     currentTask: text(current?.title), fixAttempts: run.fixAttempts || 0, createdAt: run.createdAt,
     completedAt: run.completedAt || null, updatedAt: run.updatedAt,
     canPause: !['paused', 'completed', 'failed'].includes(run.state), canResume: run.state === 'paused' && !attention };
@@ -26,4 +27,4 @@ function eventSummary(event, run, project) {
   return { id: event.id, type: event.type, timestamp: event.timestamp,
     message: event.type === 'state_changed' ? `Stage: ${labels[event.to] || 'Updated'}` : `${names[event.type] || 'Run updated'}${task ? `: ${text(task.title)}` : ''}` };
 }
-module.exports = { runSummary, eventSummary };
+module.exports = { runSummary, eventSummary, codexUsage };
