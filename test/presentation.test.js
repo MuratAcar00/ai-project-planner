@@ -32,4 +32,6 @@ test('summaries resolve current phase/task and timeline without serializing evid
   assert.equal(event.message, 'Task started: Tests');
   assert.equal(event.timestamp, '2026-01-01T00:00:00Z');
   assert.equal(JSON.stringify(event).includes('PRIVATE'), false);
+  const noProgress = eventSummary({ id: 'event-no-progress', type: 'repair_no_progress', reason: 'Repair made no progress: failure and workspace are unchanged.', timestamp: '2026-01-01T00:00:00Z' }, run, project);
+  assert.equal(noProgress.message, 'Repair made no progress: failure and workspace are unchanged.');
 });

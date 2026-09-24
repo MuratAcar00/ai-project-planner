@@ -23,9 +23,9 @@ function eventSummary(event, run, project) {
   const names = { checking_history: 'Checking previous projects', evaluating_candidates: 'Evaluating candidates', selecting_idea: 'Selecting new idea', rejected_as_duplicate: `Duplicate idea rejected: ${text(event.ideaName) || 'Candidate'}`, run_created: 'Run created', idea_generated: 'Idea generated', idea_selected: `${text(run.selection?.selected?.name) || 'Idea'} selected — ideas evaluated`,
     project_created: 'Project, requirements and workspace created', plan_created: 'Development plan created', task_started: 'Task started', task_completed: 'Task completed', task_failed: 'Task failed',
     validation_started: 'Tests running', validation_passed: 'Validation passed', validation_failed: 'Validation failed', fix_started: 'Repair started',
-    failure_analyzed: 'Failure reviewed', codex_budget_exhausted: 'Codex call budget exhausted', project_completed: 'Project completed', project_failed: 'Project failed', run_paused: 'Run paused', run_resumed: 'Run resumed',
+    failure_analyzed: 'Failure reviewed', codex_budget_exhausted: 'Codex call budget exhausted', repair_no_progress: 'Repair made no progress', project_completed: 'Project completed', project_failed: 'Project failed', run_paused: 'Run paused', run_resumed: 'Run resumed',
     run_recovered: 'Interrupted run paused after restart', infrastructure_recovered: 'Infrastructure reconciled', approval_allowed: 'Local action authorized', approval_denied: 'Operator authorization required' };
   return { id: event.id, type: event.type, timestamp: event.timestamp,
-    message: event.type === 'state_changed' ? `Stage: ${labels[event.to] || 'Updated'}` : event.type === 'codex_budget_exhausted' ? text(event.reason) : `${names[event.type] || 'Run updated'}${task ? `: ${text(task.title)}` : ''}` };
+    message: event.type === 'state_changed' ? `Stage: ${labels[event.to] || 'Updated'}` : ['codex_budget_exhausted', 'repair_no_progress'].includes(event.type) ? text(event.reason) : `${names[event.type] || 'Run updated'}${task ? `: ${text(task.title)}` : ''}` };
 }
 module.exports = { runSummary, eventSummary, codexUsage };

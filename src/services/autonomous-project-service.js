@@ -4,6 +4,7 @@ const { allTasks } = require('./execution-service');
 const { transition, event } = require('../autonomous/state');
 const { FailureAnalyzer } = require('./failure-analyzer');
 const { CODEX_BUDGET, codexUsage } = require('../autonomous/codex-budget');
+const { failureFingerprint, workspaceFingerprint } = require('../autonomous/repair-progress');
 
 const terminal = state => ['completed', 'failed'].includes(state);
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
@@ -384,6 +385,7 @@ class AutonomousProjectService {
           if (!await this.permitted(id, 'workspace_fix')) return;
           let project = await this.projectRepository.get(run.projectId);
           let task = allTasks(project).find(task => task.id === run.activeFixTaskId);
+          if (await this.blockRepairWithoutProgress(run, project)) return;
           if ((!task || !task.completed) && !await this.checkCodexBudget(id, 'repair')) return;
           if (!task) {
             if (!run.activeFixTaskId && run.fixAttempts >= run.maxFixAttempts) { await this.fail(id, 'MAX_FIX_ATTEMPTS exhausted.'); return; }
@@ -441,10 +443,13 @@ class AutonomousProjectService {
   async execute(id, project, task) {
     if (!await this.permitted(id, this.executionProvider === 'codex' ? 'codex_execution' : 'workspace_code')) return null;
     let signalSpawned;
+    let executionStarted = false;
+    let failureToRepair = null;
     const spawned = new Promise(resolve => { signalSpawned = resolve; });
     const accepted = await this.serialize(async () => {
       const currentRun = await this.runRepository.get(id);
       if (!currentRun || currentRun.state === 'paused') return null;
+      failureToRepair = task.isFix ? currentRun.pendingFailure : null;
       if (this.executionProvider === 'codex' && !await this.enforceCodexBudget(currentRun, task.isFix ? 'repair' : 'build')) return null;
       await this.projectRepository.update(project.id, stored => {
         const current = allTasks(stored).find(item => item.id === task.id);
@@ -455,6 +460,7 @@ class AutonomousProjectService {
       const result = await this.executionService.startTask(project, task, { provider: this.executionProvider,
         executionType: task.isFix ? 'repair' : 'build', onExecutionStart: this.executionProvider === 'codex' ? async executionRunId => {
           await this.recordCodexStart(id, executionRunId, task.isFix ? 'repair' : 'build');
+          executionStarted = true;
           signalSpawned();
         } : undefined,
         onExecutionFailure: this.executionProvider === 'codex' ? executionRunId => this.recordCodexFailure(id, executionRunId) : undefined });
@@ -474,7 +480,37 @@ class AutonomousProjectService {
       event(run, failed ? 'task_failed' : 'task_completed', { taskId: task.id, executionRunId: accepted.run.id, ...(failed ? { reason: current.error || result?.error } : {}) });
       return true;
     });
+    if (task.isFix && executionStarted && !failed && failureToRepair && this.failureAnalyzer.analyze(failureToRepair).category !== 'infrastructure') {
+      try {
+        const workspacePath = await this.workspaceService.getWorkspacePath(project.id);
+        const progress = { failureFingerprint: failureFingerprint(failureToRepair), workspaceFingerprint: await workspaceFingerprint(workspacePath) };
+        await this.runRepository.update(id, run => { run.repairProgress = progress; return true; });
+      } catch { /* A missing snapshot cannot safely establish a no-progress match. */ }
+    }
     return { failed, error: current.error || result?.error, output: current.result };
+  }
+  async blockRepairWithoutProgress(run, project) {
+    if (!run.pendingFailure || run.failureAnalysis?.category === 'infrastructure' ||
+        this.failureAnalyzer.analyze(run.pendingFailure).category === 'infrastructure' || !run.repairProgress) return false;
+    const fingerprint = failureFingerprint(run.pendingFailure);
+    if (fingerprint !== run.repairProgress.failureFingerprint) return false;
+    try {
+      const workspacePath = await this.workspaceService.getWorkspacePath(project.id);
+      if (await workspaceFingerprint(workspacePath) !== run.repairProgress.workspaceFingerprint) return false;
+    } catch { return false; }
+    const reason = 'Repair made no progress: failure and workspace are unchanged.';
+    const updated = await this.runRepository.update(run.id, stored => {
+      if (stored.state !== 'fixing') return false;
+      stored.resumeState = stored.state;
+      transition(stored, 'paused');
+      stored.needsAttention = true;
+      stored.pauseReason = reason;
+      stored.updatedAt = new Date().toISOString();
+      event(stored, 'repair_no_progress', { reason, failureFingerprint: fingerprint });
+      return true;
+    });
+    if (updated?.projectId) await this.projectRepository.update(updated.projectId, stored => { stored.status = 'Needs attention'; return true; });
+    return Boolean(updated);
   }
   async enforceCodexBudget(run, type) {
     const usage = codexUsage(run);

@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 const { fixture, finish, deferred } = require('./autonomous-helpers');
 const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
 const { IdeaEvaluator } = require('../src/services/idea-evaluator');
@@ -9,6 +11,7 @@ const { transition } = require('../src/autonomous/state');
 const { allTasks } = require('../src/services/execution-service');
 const { createTask, createPhase, createPlan } = require('../src/domain');
 const { CodexExecutionProvider } = require('../src/providers/codex-execution-provider');
+const { failureFingerprint, workspaceFingerprint } = require('../src/autonomous/repair-progress');
 
 test('idea provider produces multiple complete independent candidates', async () => {
   const provider = new TemplateIdeaProvider();
@@ -221,6 +224,77 @@ test('three actual build attempts complete normally and concurrent attempts cann
   const concurrent = await f.dependencies.runRepository.get(runId);
   assert.equal(processAttempts, 1);
   assert.equal(concurrent.codexUsage.buildCalls, 3);
+});
+
+test('unchanged failure and workspace block duplicate repair without consuming calls or fix attempts', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  let processAttempts = 0;
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: false, async executeTask() { processAttempts++; return { success: true }; } });
+  f.service.executionProvider = 'codex';
+  const runId = 'repair-no-progress', projectId = 'project-no-progress';
+  const workspacePath = await f.dependencies.workspaceService.getWorkspacePath(projectId);
+  await fs.mkdir(path.join(workspacePath, 'src'), { recursive: true });
+  await fs.writeFile(path.join(workspacePath, 'src', 'app.js'), 'unchanged');
+  const failure = { kind: 'validation', checkName: 'tests', message: 'Expected a successful response.' };
+  const baseTask = createTask({ id: 'no-progress-base', title: 'Build', completed: true });
+  await f.dependencies.projectRepository.create({ id: projectId, autonomousRunId: runId, status: 'In progress', runs: [], plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [baseTask] })] }) });
+  await f.dependencies.runRepository.create({ id: runId, state: 'fixing', projectId, events: [], pendingFailure: failure,
+    failureAnalysis: { category: 'tests', recoverable: true, recommendation: 'Repair tests', evidence: failure.message },
+    fixAttempts: 1, maxFixAttempts: 3, validationResults: [], validationPassed: false,
+    codexUsage: { codexCallsTotal: 1, buildCalls: 0, repairCalls: 1, failedCalls: 0 },
+    repairProgress: { failureFingerprint: failureFingerprint(failure), workspaceFingerprint: await workspaceFingerprint(workspacePath) } });
+  await f.service.drive(runId);
+  const blocked = await f.dependencies.runRepository.get(runId);
+  const project = await f.dependencies.projectRepository.get(projectId);
+  assert.equal(processAttempts, 0);
+  assert.deepEqual(blocked.codexUsage, { codexCallsTotal: 1, buildCalls: 0, repairCalls: 1, failedCalls: 0 });
+  assert.equal(blocked.fixAttempts, 1);
+  assert.equal(blocked.state, 'paused');
+  assert.equal(blocked.needsAttention, true);
+  assert.equal(blocked.events.at(-1).type, 'repair_no_progress');
+  assert.equal(allTasks(project).filter(task => task.isFix).length, 0);
+});
+
+test('changed workspace allows repair when the failure fingerprint is unchanged', async t => {
+  const f = await fixture(t, { approvalGate: new ApprovalGate({ allowCodexExecution: true }) });
+  let processAttempts = 0;
+  f.dependencies.executionService.providers.set('codex', { name: 'codex', requiresWorkspace: false, async executeTask(task, context) {
+    processAttempts++;
+    await context.onExecutionStart(context.runId);
+    return { success: true };
+  } });
+  f.service.executionProvider = 'codex';
+  const runId = 'repair-workspace-changed', projectId = 'project-workspace-changed';
+  const workspacePath = await f.dependencies.workspaceService.getWorkspacePath(projectId);
+  await fs.mkdir(path.join(workspacePath, 'src'), { recursive: true });
+  const source = path.join(workspacePath, 'src', 'app.js');
+  await fs.writeFile(source, 'before');
+  const failure = { kind: 'validation', checkName: 'tests', message: 'Expected a successful response.' };
+  const baseTask = createTask({ id: 'workspace-changed-base', title: 'Build', completed: true });
+  await f.dependencies.projectRepository.create({ id: projectId, autonomousRunId: runId, status: 'In progress', runs: [], plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [baseTask] })] }) });
+  await f.dependencies.runRepository.create({ id: runId, state: 'fixing', projectId, events: [], pendingFailure: failure,
+    failureAnalysis: { category: 'tests', recoverable: true, recommendation: 'Repair tests', evidence: failure.message },
+    fixAttempts: 1, maxFixAttempts: 3, validationResults: [], validationPassed: false,
+    codexUsage: { codexCallsTotal: 1, buildCalls: 0, repairCalls: 1, failedCalls: 0 },
+    repairProgress: { failureFingerprint: failureFingerprint(failure), workspaceFingerprint: await workspaceFingerprint(workspacePath) } });
+  await fs.writeFile(source, 'changed');
+  await f.service.drive(runId);
+  const completed = await f.dependencies.runRepository.get(runId);
+  assert.equal(processAttempts, 1);
+  assert.equal(completed.codexUsage.repairCalls, 2);
+  assert.equal(completed.fixAttempts, 2);
+});
+
+test('infrastructure failures bypass duplicate repair protection', async t => {
+  const f = await fixture(t);
+  const projectId = 'project-infra-repair';
+  const workspacePath = await f.dependencies.workspaceService.getWorkspacePath(projectId);
+  const failure = { kind: 'validation', checkName: 'tests', message: 'Sandbox could not start.' };
+  const run = { id: 'infra-repair-run', projectId, state: 'fixing', pendingFailure: failure,
+    failureAnalysis: { category: 'infrastructure', recoverable: false }, repairProgress: {
+      failureFingerprint: failureFingerprint(failure), workspaceFingerprint: await workspaceFingerprint(workspacePath)
+    } };
+  assert.equal(await f.service.blockRepairWithoutProgress(run, { id: projectId }), false);
 });
 
 test('validation failure loops through a fix task and revalidation', async t => {
