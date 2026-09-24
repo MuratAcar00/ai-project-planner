@@ -222,7 +222,7 @@ Immediately before creating a project, the service rereads history and checks no
 
 Read-only production selection smoke test: `node scripts/smoke-idea-selection.js`. It reads existing JSON history without initializing any repositories or executors, uses a fixed production-provider rotation that includes Decision Log, and reports candidates, rejections and selection. It never creates a project or invokes Codex.
 
-The `autonomous` planner provider uses the existing `PlannerService` and `ProjectService`; manual template planning remains unchanged. Selected features become requirement items with acceptance criteria. Four sequential phases cover backend, dashboard, tests and documentation. Every task has dependencies and acceptance criteria. Autonomous project status becomes `Completed` only after validation, not merely after the last development task.
+The `autonomous` planner provider uses the existing `PlannerService` and `ProjectService`; manual template planning remains unchanged. Selected features become requirement items with acceptance criteria. Three sequential implementation batches cover foundation/API, product UI/workflows and quality/tests/documentation. Each batch depends on the previous batch and has acceptance criteria. Autonomous project status becomes `Completed` only after validation, not merely after the last development task.
 
 ### State, persistence and concurrency
 

@@ -213,7 +213,7 @@ test('real pipeline novelty is reused across session runs and exhaustion never a
   const dto = await mode.snapshot();
   assert.equal(dto.session.status, 'needs_attention'); assert.equal(dto.session.completedProjects, 1);
   assert.equal((await f.dependencies.projectRepository.list()).length, 3);
-  assert.equal(f.calls.length, 4); // Exactly one product's four fake tasks; no duplicate product.
+  assert.equal(f.calls.length, 3); // Exactly one product's three dependency-ordered batches; no duplicate product.
   await mode.close();
 });
 

@@ -118,7 +118,7 @@ test('concurrent start is single-flight and request IDs remain idempotent after 
   assert.equal(new Set(results.map(result => result.run.id)).size, 1);
   await finish(f.service, results[0].run.id);
   assert.equal((await f.service.start({ requestId: 'same' })).duplicate, true);
-  assert.equal(f.calls.length, 4);
+  assert.equal(f.calls.length, 3);
 });
 
 test('pause during execution lets current task settle but prevents new tasks; resume is explicit', async t => {
@@ -135,7 +135,7 @@ test('pause during execution lets current task settle but prevents new tasks; re
   await f.service.resume(run.id);
   done = await finish(f.service, run.id);
   assert.equal(done.state, 'completed');
-  assert.equal(f.calls.length, 4);
+  assert.equal(f.calls.length, 3);
 });
 
 test('pause during validation preserves result and does not mark completed until resume', async t => {
@@ -172,7 +172,7 @@ test('restart reconciles project creation window rather than creating a duplicat
   const recovered = await finish(restarted, run.id);
   assert.equal(recovered.projectId, done.projectId);
   assert.equal((await f.dependencies.projectRepository.list()).length, 1);
-  assert.equal(f.calls.length, 4);
+  assert.equal(f.calls.length, 3);
 });
 
 test('default approval denies credentials, external actions and unknown actions', async t => {
@@ -256,7 +256,7 @@ test('restart recovers running task as failed and repairs it before dependency e
   const done = await finish(restarted, run.id);
   assert.equal(done.state, 'completed');
   assert.equal(done.fixAttempts, 1);
-  assert.match(f.calls[4], /fix-1$/);
+  assert.match(f.calls[3], /fix-1$/);
 });
 
 test('pause immediately after start does not launch a task', async t => {
@@ -352,7 +352,7 @@ test('controlled infrastructure recovery preserves identity, audit and refunds o
   assert.equal(recovered.fixAttempts, 0);
   const project = await f.dependencies.projectRepository.get(failed.projectId);
   assert.equal(project.archivedInfrastructureTasks.length, 1);
-  assert.equal(project.plan.phases.flatMap(p => p.tasks).filter(t => t.status === 'pending').length, 4);
+  assert.equal(project.plan.phases.flatMap(p => p.tasks).filter(t => t.status === 'pending').length, 3);
   assert.equal(project.runs.filter(r => r.status === 'failed').length, 2);
   await assert.rejects(() => f.service.retryInfrastructureFailure(run.id), /idle failed run/);
 });
@@ -401,7 +401,7 @@ test('legacy validator configuration failure refunds its repair and resumes vali
   broken = false;
   await f.service.resume(run.id);
   assert.equal((await finish(f.service, run.id)).state, 'completed');
-  assert.equal(f.calls.length, 5);
+  assert.equal(f.calls.length, 4);
 });
 
 test('Git metadata and structured validator failures pause without application repairs', async t => {
