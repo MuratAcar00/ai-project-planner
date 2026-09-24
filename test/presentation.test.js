@@ -19,6 +19,8 @@ test('safe run summaries map every lifecycle state and expose only appropriate c
   assert.equal(attention.canAbandon, false);
   assert.equal(runSummary({ state: 'paused' }).canAbandon, false);
   assert.equal(runSummary({ state: 'paused' }, null, { manual: true }).canAbandon, true);
+  assert.equal(runSummary({ state: 'paused' }, null, { manual: true, canRetryValidation: true }).canRetryValidation, true);
+  assert.equal(runSummary({ state: 'paused' }, null, { canRetryValidation: true }).canRetryValidation, false);
   const staleSetupFailure = runSummary({ state: 'paused', needsAttention: true, projectId: null, pendingFailure: { kind: 'setup' } });
   assert.equal(staleSetupFailure.blocksNewRun, false);
   assert.equal(runSummary({ state: 'paused', needsAttention: false }).blocksNewRun, true);

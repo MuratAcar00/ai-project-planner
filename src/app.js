@@ -55,7 +55,13 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     autonomousService: autonomous, projectRepository: repository, publisher, executionService: execution
   });
   app.locals.autonomousMode = mode;
-  const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null, { manual: await mode.isManualRun(run.id) });
+  const present = async run => {
+    const manual = await mode.isManualRun(run.id);
+    const canRetryValidation = manual
+      && typeof autonomous.canRetryValidationInfrastructureFailure === 'function'
+      && await autonomous.canRetryValidationInfrastructureFailure(run.id);
+    return runSummary(run, run.projectId ? await repository.get(run.projectId) : null, { manual, canRetryValidation });
+  };
   const ready = Promise.all([execution.initialize(), autonomous.initialize(), mode.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
@@ -123,6 +129,17 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       res.status(202).json(await present(run));
     } catch (error) {
       if (error.status === 409 || error.message.startsWith('Run must be paused')) return res.status(409).json({ error: error.message });
+      next(error);
+    }
+  });
+  app.post('/api/autonomous/:id/retry-validation', async (req, res, next) => {
+    try {
+      if (req.body && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) return res.status(400).json({ error: 'This action takes no configuration.' });
+      if (!await autonomous.runRepository.get(req.params.id)) return res.status(404).json({ error: 'Autonomous run not found.' });
+      const run = await mode.manualControl(req.params.id, 'retryValidation');
+      res.status(202).json(await present(run));
+    } catch (error) {
+      if (error.status === 409) return res.status(409).json({ error: error.message });
       next(error);
     }
   });

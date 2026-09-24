@@ -200,6 +200,56 @@ class AutonomousProjectService {
     });
   }
 
+  async validationInfrastructureCheckpoint(run) {
+    if (!run || run.state !== 'paused' || !run.needsAttention || run.pendingFailure?.kind !== 'validation' || !run.pendingFailure.validationId || this.jobs.has(run.id)) return null;
+    const project = await this.projectRepository.get(run.projectId);
+    if (!project || project.autonomousRunId !== run.id) return null;
+    const tasks = allTasks(project);
+    const developmentTasks = tasks.filter(task => !task.isFix);
+    if (!developmentTasks.length || developmentTasks.some(task => !task.completed || task.status !== 'completed') || tasks.some(task => task.status === 'running')) return null;
+    const executionRuns = project.runs || [];
+    if (executionRuns.some(item => item.status === 'running' || this.executionService.jobs?.has(item.id))) return null;
+
+    const validation = (run.validationResults || []).find(item => item.id === run.pendingFailure.validationId);
+    if (!validation || validation.passed !== false) return null;
+    const failedCheck = validation.checks?.find(item => item.name === run.pendingFailure.checkName && item.passed === false)
+      || validation.checks?.find(item => item.passed === false);
+    if (!failedCheck) return null;
+    const infrastructureError = Boolean(run.pendingFailure.infrastructureError || validation.infrastructureError || failedCheck.infrastructureError);
+    const classification = this.failureAnalyzer.analyze({ kind: 'validation', infrastructureError,
+      message: JSON.stringify({ pendingFailure: run.pendingFailure, failedCheck }) });
+    if (classification.category !== 'infrastructure') return null;
+    return { project, validation, failedCheck };
+  }
+
+  async canRetryValidationInfrastructureFailure(id) {
+    const run = await this.runRepository.get(id);
+    return Boolean(await this.validationInfrastructureCheckpoint(run));
+  }
+
+  async retryValidationInfrastructureFailure(id) {
+    await this.initialize();
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      const checkpoint = await this.validationInfrastructureCheckpoint(run);
+      if (!checkpoint) throw Object.assign(new Error('Validation infrastructure recovery requires a paused Needs Attention run with completed tasks and no active execution.'), { status: 409 });
+      const timestamp = new Date().toISOString();
+      const recovered = await this.runRepository.update(id, stored => {
+        if (stored.state !== 'paused' || !stored.needsAttention || stored.pendingFailure?.validationId !== run.pendingFailure.validationId) {
+          throw Object.assign(new Error('Validation recovery checkpoint changed.'), { status: 409 });
+        }
+        Object.assign(stored, { state: 'testing', resumeState: 'testing', needsAttention: false,
+          pendingFailure: null, failureAnalysis: null, pauseReason: null, error: null, validationPassed: false, updatedAt: timestamp });
+        event(stored, 'state_changed', { from: 'paused', to: 'testing', reason: 'Validation infrastructure retry.' });
+        event(stored, 'validation_infrastructure_retry_started', { validationId: run.pendingFailure.validationId, checkName: run.pendingFailure.checkName });
+        return true;
+      });
+      await this.projectRepository.update(checkpoint.project.id, stored => { stored.status = 'In progress'; return true; });
+      this.launch(id);
+      return recovered;
+    });
+  }
+
   // Trusted operator-only recovery for the legacy empty-root-.git false rejection.
   // Revalidate before any persistent mutation; retain tasks, executions and failed checks.
   async recoverValidationInfrastructureFailure(id) {
@@ -407,7 +457,7 @@ class AutonomousProjectService {
           [[result.passed ? 'validation_passed' : 'validation_failed', { validationId: record.id }]]);
           if (result.infrastructureError || failedCheck?.infrastructureError) {
             const failureAnalysis = this.failureAnalyzer.analyze({ kind: 'validation', infrastructureError: true, message: JSON.stringify(failedCheck || result).slice(0, 2500) });
-            await this.move(id, 'testing', { pendingFailure: null, failureAnalysis, needsAttention: true }, [['failure_analyzed', failureAnalysis]]);
+            await this.move(id, 'testing', { failureAnalysis, needsAttention: true }, [['failure_analyzed', failureAnalysis]]);
             await this.projectRepository.update(run.projectId, project => { project.status = 'Needs attention'; return true; });
             await this.pause(id, 'Validation sandbox unavailable; operator attention required.'); return;
           }

@@ -145,6 +145,78 @@ test('Flutter scaffold setup failure pauses as infrastructure before execution w
   assert.ok(paused.events.some(event => event.type === 'workspace_setup_failed'));
 });
 
+test('validation infrastructure recovery retries testing only and preserves completed tasks and Codex usage', async t => {
+  let validationCalls = 0;
+  const f = await fixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate() {
+      validationCalls++;
+      return validationCalls === 1
+        ? { passed: false, infrastructureError: true, checks: [{ name: 'flutter-test', passed: false, infrastructureError: true, output: 'Flutter SDK cache bootstrap failed.' }] }
+        : { passed: true, checks: [{ name: 'flutter-test', passed: true, output: 'All tests passed' }, { name: 'android-debug-apk', passed: true }] };
+    }
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const paused = await finish(f.service, run.id);
+  const project = await f.dependencies.projectRepository.get(paused.projectId);
+  const tasks = allTasks(project).filter(task => !task.isFix);
+  assert.equal(tasks.length, 3);
+  assert.ok(tasks.every(task => task.completed && task.status === 'completed'));
+  assert.equal(f.calls.length, 3);
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.needsAttention, true);
+  assert.equal(paused.pendingFailure.kind, 'validation');
+  assert.equal(paused.pendingFailure.infrastructureError, true);
+  assert.equal(await f.service.canRetryValidationInfrastructureFailure(run.id), true);
+  const usage = { codexCallsTotal: 3, buildCalls: 3, repairCalls: 0, failedCalls: 0 };
+  await f.dependencies.runRepository.update(run.id, stored => { stored.codexUsage = usage; return true; });
+  f.service.jobs.set(run.id, Promise.resolve());
+  assert.equal(await f.service.canRetryValidationInfrastructureFailure(run.id), false);
+  await assert.rejects(() => f.service.retryValidationInfrastructureFailure(run.id), { status: 409 });
+  f.service.jobs.delete(run.id);
+  const attempts = await Promise.allSettled([
+    f.service.retryValidationInfrastructureFailure(run.id),
+    f.service.retryValidationInfrastructureFailure(run.id)
+  ]);
+  assert.equal(attempts.filter(item => item.status === 'fulfilled').length, 1);
+  assert.equal(attempts.find(item => item.status === 'rejected').reason.status, 409);
+  const recovery = attempts.find(item => item.status === 'fulfilled').value;
+  assert.equal(recovery.state, 'testing');
+  assert.equal(recovery.needsAttention, false);
+  assert.equal(recovery.pendingFailure, null);
+  assert.equal(recovery.fixAttempts, 0);
+  assert.equal(recovery.events.at(-1).type, 'validation_infrastructure_retry_started');
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'completed');
+  assert.equal(validationCalls, 2);
+  assert.equal(f.calls.length, 3);
+  assert.deepEqual(done.codexUsage, usage);
+  assert.equal(done.fixAttempts, 0);
+  assert.ok(done.events.some(item => item.type === 'validation_infrastructure_retry_started'));
+  await assert.rejects(() => f.service.retryValidationInfrastructureFailure(run.id), { status: 409 });
+});
+
+test('validation infrastructure recovery rejects generated-code failures', async t => {
+  const f = await fixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate: () => ({ passed: false, infrastructureError: true, checks: [{ name: 'flutter-test', passed: false, infrastructureError: true, output: 'Flutter SDK cache bootstrap failed.' }] })
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const paused = await finish(f.service, run.id);
+  await f.dependencies.runRepository.update(run.id, stored => {
+    stored.validationResults.at(-1).infrastructureError = false;
+    stored.validationResults.at(-1).checks[0] = { name: 'flutter-test', passed: false, infrastructureError: false, output: 'Expected value to be true.' };
+    stored.pendingFailure.infrastructureError = false;
+    stored.pendingFailure.message = 'Expected value to be true.';
+    stored.failureAnalysis = { category: 'tests', recoverable: true };
+    return true;
+  });
+  assert.equal(await f.service.canRetryValidationInfrastructureFailure(run.id), false);
+  await assert.rejects(() => f.service.retryValidationInfrastructureFailure(run.id), { status: 409 });
+  assert.equal((await f.dependencies.runRepository.get(run.id)).fixAttempts, paused.fixAttempts);
+  assert.equal(f.calls.length, 3);
+});
+
 test('manual start preserves but does not treat non-resumable setup failure as active', async t => {
   const f = await fixture(t);
   await f.service.initialize();
@@ -536,7 +608,8 @@ test('sandbox infrastructure failure pauses without consuming repair budget', as
   const done = await finish(f.service, run.id);
   assert.equal(done.state, 'paused');
   assert.equal(done.fixAttempts, 0);
-  assert.equal(done.pendingFailure, null);
+  assert.equal(done.pendingFailure.kind, 'validation');
+  assert.equal(done.pendingFailure.infrastructureError, true);
 });
 
 test('missing dependencies fail safely without running blocked tasks', async t => {

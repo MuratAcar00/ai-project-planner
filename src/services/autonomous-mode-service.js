@@ -136,7 +136,9 @@ class AutonomousModeService {
       if (await this.active()) throw fail('Use Autonomous Mode controls while a session is active.');
       const run = await this.autonomousService.runRepository.get(id);
       if (action === 'abandon' && !await this.isManualRun(id)) throw fail('Only manual autonomous runs can be abandoned.');
+      if (action === 'retryValidation' && !await this.isManualRun(id)) throw fail('Only manual autonomous runs can retry validation.');
       if (action === 'resume' && run?.needsAttention) throw fail('Needs Attention: trusted operator review is required.');
+      if (action === 'retryValidation') return this.autonomousService.retryValidationInfrastructureFailure(id);
       return this.autonomousService[action](id);
     });
   }

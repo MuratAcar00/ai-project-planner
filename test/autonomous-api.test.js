@@ -86,6 +86,36 @@ test('manual abandon endpoint requires settled paused run and preserves its hist
   assert.equal((await f.post('/api/autonomous/active-manual-run/abandon')).status, 409);
 });
 
+test('retry-validation API recovers a completed mobile build without repeating tasks or usage', async t => {
+  let validations = 0;
+  const f = await serverFixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate() {
+      validations++;
+      return validations === 1
+        ? { passed: false, infrastructureError: true, checks: [{ name: 'flutter-test', passed: false, infrastructureError: true, output: 'Flutter SDK cache bootstrap failed.' }] }
+        : { passed: true, checks: [{ name: 'flutter-test', passed: true }, { name: 'android-debug-apk', passed: true }] };
+    }
+  });
+  const { run } = await f.service.start({ requestId: 'mobile-validation-retry', platformPreference: 'mobile' });
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.state, 'paused');
+  const usage = { codexCallsTotal: 3, buildCalls: 3, repairCalls: 0, failedCalls: 0 };
+  await f.dependencies.runRepository.update(run.id, stored => { stored.codexUsage = usage; return true; });
+  const summary = await (await fetch(`${f.base}/api/autonomous/${run.id}`)).json();
+  assert.equal(summary.canRetryValidation, true);
+  const response = await f.post(`/api/autonomous/${run.id}/retry-validation`);
+  assert.equal(response.status, 202);
+  const recovered = await finish(f.service, run.id);
+  assert.equal(recovered.state, 'completed');
+  assert.equal(validations, 2);
+  assert.equal(f.calls.length, 3);
+  assert.deepEqual(recovered.codexUsage, usage);
+  assert.equal(recovered.fixAttempts, 0);
+  assert.ok(recovered.events.some(item => item.type === 'validation_infrastructure_retry_started'));
+  assert.equal((await f.post(`/api/autonomous/${run.id}/retry-validation`)).status, 409);
+});
+
 test('manual start ignores preserved non-resumable setup failure but retains active-run protection', async t => {
   const entered = deferred(); const release = deferred();
   const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
