@@ -13,6 +13,7 @@ const { createTask, createPhase, createPlan } = require('../src/domain');
 const { CodexExecutionProvider } = require('../src/providers/codex-execution-provider');
 const { failureFingerprint, workspaceFingerprint } = require('../src/autonomous/repair-progress');
 const { chooseTargetPlatform, projectTargetPlatform } = require('../src/autonomous/platform');
+const { AutonomousPlannerProvider } = require('../src/providers/autonomous-planner-provider');
 
 test('idea provider produces multiple complete independent candidates', async () => {
   const provider = new TemplateIdeaProvider();
@@ -37,6 +38,26 @@ test('run summaries expose the selected target platform with a legacy web fallba
   const run = { id: 'run-summary', state: 'planning', selection: { selected: { name: 'Example', targetPlatform: 'mobile', oneLinePitch: 'A mobile workflow' } } };
   assert.equal(runSummary(run, null).targetPlatform, 'mobile');
   assert.equal(runSummary({ ...run, selection: null }, {}).targetPlatform, 'web');
+});
+
+test('autonomous planner adapts architecture, requirements and tasks to web, mobile, and combined targets', async () => {
+  const planner = new AutonomousPlannerProvider();
+  const base = { name: 'Field Notes', description: 'Record field visits and share team reports.' };
+  const plans = await Promise.all(['web', 'mobile', 'web_mobile'].map(targetPlatform => planner.generatePlan({ ...base, targetPlatform })));
+  for (const plan of plans) {
+    assert.deepEqual(plan.phases.map(phase => phase.name), ['Foundation', 'Product', 'Quality']);
+    assert.equal(plan.phases.length, 3);
+    assert.ok(plan.phases.every(phase => phase.tasks.length === 1));
+  }
+  assert.match(plans[0].architecture, /Node\.js CommonJS/);
+  assert.match(plans[0].phases[1].tasks[0].description, /browser interface/);
+  assert.match(plans[1].architecture, /Flutter application for both Android and iOS/);
+  assert.match(plans[1].phases[1].tasks[0].description, /Android and iOS/);
+  assert.match(plans[2].architecture, /Share a backend\/API/);
+  assert.match(plans[2].phases[0].tasks[0].description, /API contracts/);
+  assert.match(plans[2].phases[1].tasks[0].description, /Flutter/);
+  assert.equal((await planner.generatePlan(base)).targetPlatform, 'web');
+  for (const plan of plans) assert.match(plan.architecture, /Do not deploy or run git operations/);
 });
 
 test('evaluation scores feasibility plus novelty and diversity criteria, excludes paid/external ideas and breaks ties deterministically', async () => {
