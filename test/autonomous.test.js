@@ -77,8 +77,31 @@ test('config and state machine reject unsafe inputs and invalid transitions', ()
   for (const input of [{ command: 'sh' }, { workspace: '/tmp' }, { provider: 'codex' }, { candidateCount: 4 }, [], null, { requestId: '../a' }]) assert.throws(() => validateStart(input));
   assert.equal(fixLimit(0), 0);
   for (const value of [-1, 11, 'invalid', 1.5]) assert.throws(() => fixLimit(value));
+  const { validateStart } = require('../src/services/autonomous-project-service');
+  for (const platformPreference of ['auto', 'web', 'mobile', 'web_mobile']) assert.equal(validateStart({ platformPreference }).platformPreference, platformPreference);
+  assert.equal(validateStart().platformPreference, 'auto');
+  for (const platformPreference of ['Flutter', 'desktop', '', null, 1]) assert.throws(() => validateStart({ platformPreference }), /platformPreference/);
   assert.throws(() => transition({ state: 'idle' }, 'completed'));
   assert.throws(() => transition({ state: 'completed' }, 'executing'));
+});
+
+test('requested platform preference is persisted and applied before planning and workspace setup', async t => {
+  const ideaProvider = { async generateIdeas() { return [{ id: 'field-tutor-pref', name: 'Field Tutor', oneLinePitch: 'Support lessons in the field.', targetUser: 'Independent tutors', problem: 'Lesson feedback is scattered', solution: 'Record lessons and observations', coreFeatures: ['Track lessons'], complexity: 1, usefulness: 5, differentiation: 4, estimatedTasks: 4, testability: 5, deploymentSimplicity: 5, externalDependencies: [], paidApiRequired: false, generatedAt: new Date().toISOString() }]; } };
+  for (const [platformPreference, expected] of [['auto', 'mobile'], ['web', 'web'], ['mobile', 'mobile'], ['web_mobile', 'web_mobile']]) {
+    let plannedTarget;
+    let scaffoldTarget;
+    const f = await fixture(t, { ideaProvider, flutterScaffolder: { async prepare(project) { scaffoldTarget = project.targetPlatform; return { prepared: true }; } } });
+    const planner = f.dependencies.projectService.plannerService.providers.get('autonomous');
+    const original = planner.generatePlan.bind(planner);
+    planner.generatePlan = async input => { plannedTarget = input.targetPlatform; return original(input); };
+    const { run } = await f.service.start({ platformPreference });
+    const done = await finish(f.service, run.id);
+    assert.equal(done.platformPreference, platformPreference);
+    assert.equal(done.config.platformPreference, platformPreference);
+    assert.equal(plannedTarget, expected);
+    assert.equal((await f.dependencies.projectRepository.get(done.projectId)).targetPlatform, expected);
+    assert.equal(scaffoldTarget, expected === 'mobile' ? 'mobile' : undefined);
+  }
 });
 
 test('successful run creates requirements and plan, executes dependencies, validates then completes', async t => {

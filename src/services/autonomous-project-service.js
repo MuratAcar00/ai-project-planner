@@ -9,17 +9,20 @@ const { chooseTargetPlatform } = require('../autonomous/platform');
 const { FlutterWorkspaceScaffolder } = require('./flutter-workspace-scaffolder');
 
 const terminal = state => ['completed', 'failed'].includes(state);
+const PLATFORM_PREFERENCES = ['auto', 'web', 'mobile', 'web_mobile'];
 function fixLimit(value = process.env.MAX_FIX_ATTEMPTS ?? 3) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 10) throw new Error('MAX_FIX_ATTEMPTS must be an integer from 0 to 10.');
   return parsed;
 }
 function validateStart(input = {}) {
-  if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).some(key => !['candidateCount', 'requestId'].includes(key))) throw new Error('Only candidateCount and requestId are supported.');
+  if (!input || Array.isArray(input) || typeof input !== 'object' || Object.keys(input).some(key => !['candidateCount', 'requestId', 'platformPreference'].includes(key))) throw new Error('Only candidateCount, requestId, and platformPreference are supported.');
   const candidateCount = input.candidateCount ?? 3;
   if (!Number.isInteger(candidateCount) || candidateCount < 1 || candidateCount > 3) throw new Error('candidateCount must be between 1 and 3.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(input.requestId))) throw new Error('Invalid requestId.');
-  return { candidateCount, requestId: input.requestId || null };
+  const platformPreference = Object.hasOwn(input, 'platformPreference') ? input.platformPreference : 'auto';
+  if (!PLATFORM_PREFERENCES.includes(platformPreference)) throw new Error('platformPreference must be auto, web, mobile, or web_mobile.');
+  return { candidateCount, requestId: input.requestId || null, platformPreference };
 }
 
 class AutonomousProjectService {
@@ -70,7 +73,7 @@ class AutonomousProjectService {
       const existing = runs.find(run => config.requestId && run.config.requestId === config.requestId) || runs.find(run => !terminal(run.state));
       if (existing) return { run: existing, duplicate: true };
       const now = new Date().toISOString();
-      const run = { id: makeId('autonomous'), state: 'idle', projectId: null, config, maxFixAttempts: this.maxFixAttempts,
+      const run = { id: makeId('autonomous'), state: 'idle', projectId: null, config, platformPreference: config.platformPreference, maxFixAttempts: this.maxFixAttempts,
         fixAttempts: 0, ideas: null, selection: null, pendingFailure: null, activeFixTaskId: null,
         codexUsage: { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 }, codexExecutionAttempts: [],
         validationResults: [], events: [], createdAt: now, updatedAt: now };
@@ -286,8 +289,9 @@ class AutonomousProjectService {
             break;
           }
           await this.move(id, 'evaluating', {}, [['selecting_idea', {}]]);
-          selection.selected.targetPlatform = chooseTargetPlatform(selection.selected);
-          await this.move(id, 'planning', { selection }, [['idea_selected', { ideaId: selection.selected.id, targetPlatform: selection.selected.targetPlatform, reason: selection.reason, evaluations: selection.evaluations }]]);
+          const platformPreference = run.platformPreference || run.config?.platformPreference || 'auto';
+          selection.selected.targetPlatform = platformPreference === 'auto' ? chooseTargetPlatform(selection.selected) : platformPreference;
+          await this.move(id, 'planning', { selection }, [['idea_selected', { ideaId: selection.selected.id, platformPreference, targetPlatform: selection.selected.targetPlatform, reason: selection.reason, evaluations: selection.evaluations }]]);
           break;
         }
         case 'planning': {
@@ -581,4 +585,4 @@ class AutonomousProjectService {
     });
   }
 }
-module.exports = { AutonomousProjectService, validateStart, fixLimit };
+module.exports = { AutonomousProjectService, validateStart, fixLimit, PLATFORM_PREFERENCES };

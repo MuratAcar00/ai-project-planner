@@ -93,8 +93,8 @@ test('task execution and run listing endpoints return persisted execution data',
   await repository.create(project);
   const service = new ExecutionService({ projectRepository: repository, providers: [new TemplateExecutionProvider()] });
   const server = createApp({ projectRepository: repository, executionService: service }).listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
   const execution = await fetch(`${baseUrl}/api/projects/${project.id}/tasks/${task.id}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: 'template' }) });
@@ -119,8 +119,8 @@ test('task execution endpoint returns 409 for a blocked task', async t => {
   await repository.create(project);
   const service = new ExecutionService({ projectRepository: repository, providers: [new TemplateExecutionProvider()] });
   const server = createApp({ projectRepository: repository, executionService: service }).listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/projects/${project.id}/tasks/${second.id}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
 
   assert.equal(response.status, 409);

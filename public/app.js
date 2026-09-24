@@ -114,7 +114,8 @@ function setupFactory() {
     try {
       let requestId = sessionStorage.getItem('factory-start-request');
       if (!requestId) { requestId = crypto.randomUUID(); sessionStorage.setItem('factory-start-request', requestId); }
-      const result = await api('/api/autonomous/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId }) });
+      const platformPreference = document.querySelector('#platform-preference').value;
+      const result = await api('/api/autonomous/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId, platformPreference }) });
       sessionStorage.removeItem('factory-start-request');
       message.textContent = `Run ${result.run.id} · ${result.run.label}${result.duplicate ? ' (existing run)' : ''}`;
     } catch (error) { message.textContent = error.message; }

@@ -13,10 +13,10 @@ test.before(async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'planner-test-'));
   dataFile = path.join(dir, 'projects.json');
   server = createApp({ dataFile }).listen(0);
-  await new Promise(resolve => server.once('listening', resolve));
+  await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { await new Promise(resolve => server.close(resolve)); await fs.rm(path.dirname(dataFile), { recursive: true, force: true }); });
+test.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await fs.rm(path.dirname(dataFile), { recursive: true, force: true }); });
 
 test('creates a project with a structured plan', async () => {
   const response = await request('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });

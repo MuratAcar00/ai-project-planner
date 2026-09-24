@@ -10,7 +10,9 @@ function runSummary(run, project) {
   const completed = tasks.filter(task => task.completed).length;
   const current = tasks.find(task => task.status === 'running') || tasks.find(task => !task.completed);
   const attention = Boolean(run.needsAttention);
-  return { id: run.id, projectId: run.projectId, name: text(project?.name || run.selection?.selected?.name) || 'New SaaS',
+  const requestedPlatform = run.platformPreference || run.config?.platformPreference || 'auto';
+  const platformPreference = ['auto', 'web', 'mobile', 'web_mobile'].includes(requestedPlatform) ? requestedPlatform : 'auto';
+  return { id: run.id, projectId: run.projectId, name: text(project?.name || run.selection?.selected?.name) || 'New SaaS', platformPreference,
     selectedIdea: text(run.selection?.selected?.oneLinePitch), targetPlatform: projectTargetPlatform(project || { targetPlatform: run.selection?.selected?.targetPlatform }), state: run.state,
     label: attention ? 'Needs Attention' : labels[run.state] || 'Unknown', needsAttention: attention,
     projectStatus: project?.status || 'Planning', progress: tasks.length ? Math.round(completed / tasks.length * 100) : 0,
