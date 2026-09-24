@@ -42,7 +42,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     runRepository: autonomousRunRepository || new JsonAutonomousRunRepository(path.join(path.dirname(dataFile || repository.filePath || path.join(__dirname, '..', 'data', 'projects.json')), 'autonomous-runs.json')),
     projectRepository: repository, projectService, executionService: execution, workspaceService: workspaces,
     ideaProvider: new LocalIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
-    validationService: new WorkspaceValidationService({ workspaceService: workspaces }),
+    validationService: new WorkspaceValidationService({ workspaceService: workspaces, projectRepository: repository }),
     flutterScaffolder: new FlutterWorkspaceScaffolder({ workspaceService: workspaces, projectRepository: repository }),
     approvalGate: approvalGate || new ApprovalGate()
   });

@@ -48,6 +48,9 @@ test('CodexExecutionProvider has the codex provider name and builds a bounded ta
   assert.match(prompt, /Tests pass/);
   assert.match(prompt, /task-setup/);
   assert.match(prompt, /only within the working directory/);
+  const mobilePrompt = buildTaskPrompt(task, { workspacePath: '/tmp/workspace', targetPlatform: 'mobile' });
+  assert.match(mobilePrompt, /Flutter application using Dart, targeting Android and iOS/);
+  assert.match(mobilePrompt, /do not create a Node\.js\/JavaScript or HTML web application/);
 });
 
 test('CodexExecutionProvider requires an absolute, existing workspace directory', async t => {
@@ -162,7 +165,7 @@ test('ExecutionService selects Codex safely and keeps the template provider work
   const codex = providerWith(child => child.emit('close', 0, null));
   const codexTask = createTask({ id: 'task-codex-service', title: 'Use Codex', estimate: '1 hour' });
   const templateTask = createTask({ id: 'task-template-service', title: 'Use template', estimate: '1 hour' });
-  const project = { id: 'project-codex-service', status: 'Planning', plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [codexTask, templateTask] })] }), runs: [] };
+  const project = { id: 'project-codex-service', targetPlatform: 'mobile', status: 'Planning', plan: createPlan({ phases: [createPhase({ name: 'Build', goal: 'Build', tasks: [codexTask, templateTask] })] }), runs: [] };
   await repository.create(project);
   const service = new ExecutionService({ projectRepository: repository, workspaceService: new WorkspaceService({ workspaceRoot }), providers: [new TemplateExecutionProvider(), codex] });
 
@@ -171,6 +174,7 @@ test('ExecutionService selects Codex safely and keeps the template provider work
 
   assert.equal(codexResult.task.result.provider, 'codex');
   assert.equal(codexResult.run.status, 'completed');
+  assert.match(providerWith.calls.at(-1)[1].at(-1), /Flutter application using Dart, targeting Android and iOS/);
   assert.equal(templateResult.task.result.message, 'Template execution completed for task: Use template.');
   assert.equal(templateResult.run.status, 'completed');
   assert.match(codexResult.task.result.stdout, /^$/);

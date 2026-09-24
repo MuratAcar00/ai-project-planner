@@ -15,8 +15,47 @@ async function validationFixture(t, result) {
   for (const file of ['src/server.js', 'src/app.js', 'public/index.html', 'test/app.test.js']) await fs.writeFile(path.join(workspace, file), '// fixture');
   const calls = [];
   const runner = { async run(cwd, command, args) { calls.push({ cwd, command, args }); return result ? result(command, args) : { passed: true, output: '# tests 1\n# pass 1' }; } };
-  return { ...f, workspace, manifest, calls, validation: new WorkspaceValidationService({ workspaceService: f.dependencies.workspaceService, runner }) };
+  return { ...f, workspace, manifest, calls, validation: new WorkspaceValidationService({ workspaceService: f.dependencies.workspaceService, projectRepository: f.dependencies.projectRepository, runner }) };
 }
+
+async function flutterValidationFixture(t, result) {
+  const f = await fixture(t);
+  const projectId = 'flutter-validation-fixture';
+  const workspace = await f.dependencies.workspaceService.getWorkspacePath(projectId);
+  for (const file of ['pubspec.yaml', 'lib/main.dart', 'test/widget_test.dart', 'ios/Runner.xcodeproj/project.pbxproj']) {
+    const target = path.join(workspace, file);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, file.endsWith('.yaml') ? 'name: fixture\n' : '// fixture');
+  }
+  await fs.mkdir(path.join(workspace, 'android'), { recursive: true });
+  await f.dependencies.projectRepository.create({ id: projectId, targetPlatform: 'mobile' });
+  const calls = [];
+  const runner = { async run(cwd, command, args) { calls.push({ cwd, command, args }); return result ? result(command, args) : { passed: true, output: 'All tests passed' }; } };
+  const validation = new WorkspaceValidationService({ workspaceService: f.dependencies.workspaceService, projectRepository: f.dependencies.projectRepository, runner });
+  return { ...f, workspace, projectId, calls, validation };
+}
+
+test('mobile validation runs Flutter tests followed by the Android debug APK build', async t => {
+  const f = await flutterValidationFixture(t);
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.passed, true);
+  assert.deepEqual(result.checks.map(check => check.name), ['flutter-test', 'android-debug-apk']);
+  assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['flutter', ['test']], ['flutter', ['build', 'apk', '--debug']]]);
+  assert.ok(f.calls.every(call => call.cwd === f.workspace));
+});
+
+test('Flutter generated-code failures remain repairable while toolchain failures are infrastructure', async t => {
+  const appFailure = await flutterValidationFixture(t, (_command, args) => ({ passed: args[0] !== 'build', output: args[0] === 'build' ? 'Gradle task assembleDebug failed: Dart compilation error in lib/main.dart' : 'All tests passed' }));
+  const applicationResult = await appFailure.validation.validate({ projectId: appFailure.projectId });
+  assert.equal(applicationResult.passed, false);
+  assert.equal(applicationResult.infrastructureError, false);
+  assert.equal(applicationResult.checks.at(-1).name, 'android-debug-apk');
+  const toolchain = await flutterValidationFixture(t, () => ({ passed: false, output: 'Android SDK not found. Define a valid SDK location.' }));
+  const infrastructureResult = await toolchain.validation.validate({ projectId: toolchain.projectId });
+  assert.equal(infrastructureResult.infrastructureError, true);
+  assert.equal(infrastructureResult.checks[0].name, 'flutter-test');
+  assert.equal(toolchain.calls.length, 1);
+});
 
 test('validation runs offline install, syntax checks, tests and startup health with fixed arguments', async t => {
   const f = await validationFixture(t);
@@ -102,6 +141,26 @@ test('sandbox runner clears environment and mounts only workspace writable witho
   assert.equal(observed.args.filter(value => value === '--bind').length, 1);
   assert.equal(observed.args.includes('--share-net'), false);
   await assert.rejects(() => runner.run('/tmp', 'sh', []));
+});
+
+test('Flutter validation runner only accepts fixed test and Android APK commands inside the isolated workspace', async () => {
+  let observed;
+  const runner = new SandboxValidationRunner({ flutterExecutable: '/usr/bin/node', spawnProcess(command, args, options) {
+    observed = { command, args, options };
+    const process = child();
+    setImmediate(() => { process.stdout.emit('data', 'Flutter test output'); process.emit('close', 0, null); });
+    return process;
+  } });
+  const result = await runner.run('/tmp/flutter-workspace', 'flutter', ['build', 'apk', '--debug']);
+  assert.equal(result.passed, true);
+  assert.equal(observed.command, '/usr/bin/bwrap');
+  assert.ok(observed.args.includes('--unshare-all'));
+  assert.ok(observed.args.some((value, index) => value === '--ro-bind' && observed.args[index + 1] === '/usr' && observed.args[index + 2] === '/usr'));
+  assert.deepEqual(observed.args.slice(-4), ['/usr/bin/node', 'build', 'apk', '--debug']);
+  assert.equal(observed.options.shell, false);
+  assert.equal(observed.options.cwd, '/tmp/flutter-workspace');
+  assert.equal(observed.args.includes('--share-net'), false);
+  await assert.rejects(() => runner.run('/tmp/flutter-workspace', 'flutter', ['build', 'ios']));
 });
 
 test('sandbox absence and timeout fail closed with bounded completion', async () => {

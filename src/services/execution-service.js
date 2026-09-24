@@ -107,7 +107,7 @@ class ExecutionService {
       const work = async () => {
         const workspacePath = executor.requiresWorkspace ? await this.resolveWorkspace(project.id) : undefined;
         if (expired) throw new Error('Execution job timed out.');
-        return executor.executeTask(task, { projectId: project.id, runId: run.id, workspacePath, timeoutMs, ...callbacks });
+        return executor.executeTask(task, { projectId: project.id, runId: run.id, workspacePath, timeoutMs, targetPlatform: project.targetPlatform || 'web', ...callbacks });
       };
       const output = await Promise.race([
         work(),
