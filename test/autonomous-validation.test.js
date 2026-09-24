@@ -75,6 +75,19 @@ test('Flutter SDK read-only cache/bootstrap errors are classified as infrastruct
   assert.equal(f.calls.length, 1);
 });
 
+test('Flutter Java and which discovery failures are classified as infrastructure', async t => {
+  const output = 'ProcessException: Failed to find "which" in the search path.\n  Command: which ';
+  const f = await flutterValidationFixture(t, (_command, args) => args[0] === 'build'
+    ? { passed: false, exitCode: 1, output }
+    : { passed: true, output: 'All tests passed' });
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.passed, false);
+  assert.equal(result.infrastructureError, true);
+  assert.equal(result.checks[0].passed, true);
+  assert.equal(result.checks[1].name, 'android-debug-apk');
+  assert.equal(result.checks[1].infrastructureError, true);
+});
+
 test('Flutter SDK cache seeding failure is infrastructure and launches no validation command', async t => {
   const f = await flutterValidationFixture(t);
   f.validation.runner.prepareFlutterCache = async () => { throw Object.assign(new Error('read-only SDK cache'), { code: 'EROFS' }); };
@@ -189,6 +202,10 @@ test('Flutter cache is privately seeded, mounted over the read-only SDK cache fo
     setImmediate(() => { process.stdout.emit('data', 'Flutter validation output'); process.emit('close', 0, null); });
     return process;
   } });
+  runner.flutterToolchainAliases = async () => [
+    { target: '/usr/bin/which.debianutils', destination: '/etc/alternatives/which' },
+    { target: '/usr/lib/jvm/java-17-openjdk-amd64/bin/java', destination: '/etc/alternatives/java' }
+  ];
   const cache = await runner.prepareFlutterCache(workspace);
   assert.equal(await fs.readFile(path.join(cache.path, 'engine.stamp'), 'utf8'), 'installed-engine\n');
   assert.notEqual(cache.path, sourceCache);
@@ -203,6 +220,14 @@ test('Flutter cache is privately seeded, mounted over the read-only SDK cache fo
     assert.ok(invocation.args.includes('--unshare-all'));
     assert.ok(invocation.args.some((value, index) => value === '--ro-bind' && invocation.args[index + 1] === flutterRoot && invocation.args[index + 2] === flutterRoot));
     assert.ok(invocation.args.some((value, index) => value === '--bind' && invocation.args[index + 1] === cache.path && invocation.args[index + 2] === path.join(flutterRoot, 'bin', 'cache')));
+    assert.ok(invocation.args.includes('--dir') && invocation.args.includes('/etc/alternatives'));
+    for (const alias of [
+      ['/usr/bin/which.debianutils', '/etc/alternatives/which'],
+      ['/usr/lib/jvm/java-17-openjdk-amd64/bin/java', '/etc/alternatives/java']
+    ]) assert.ok(invocation.args.some((value, index) => value === '--symlink' && invocation.args[index + 1] === alias[0] && invocation.args[index + 2] === alias[1]));
+    assert.ok(invocation.args.some((value, index) => value === '--chmod' && invocation.args[index + 1] === '0555' && invocation.args[index + 2] === '/etc/alternatives'));
+    assert.ok(invocation.args.some((value, index) => value === '--chmod' && invocation.args[index + 1] === '0555' && invocation.args[index + 2] === '/etc'));
+    assert.equal(invocation.args.some((value, index) => value === '--ro-bind' && invocation.args[index + 1] === '/etc'), false);
     assert.ok(invocation.args.includes('--bind'));
     assert.equal(invocation.options.shell, false);
     assert.equal(invocation.options.cwd, workspace);

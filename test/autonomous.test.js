@@ -602,14 +602,19 @@ test('default approval denies credentials, external actions and unknown actions'
   assert.ok(done.events.some(event => event.type === 'approval_denied'));
 });
 
-test('sandbox infrastructure failure pauses without consuming repair budget', async t => {
-  const f = await fixture(t, { validate: () => ({ passed: false, infrastructureError: true }) });
+test('Flutter toolchain discovery failure pauses without consuming repair budget', async t => {
+  const output = 'ProcessException: Failed to find "which" in the search path. Command: which ';
+  const f = await fixture(t, { validate: () => ({ passed: false, checks: [{ name: 'android-debug-apk', passed: false, exitCode: 1, infrastructureError: false, output }] }) });
   const { run } = await f.service.start();
   const done = await finish(f.service, run.id);
   assert.equal(done.state, 'paused');
+  assert.equal(done.needsAttention, true);
   assert.equal(done.fixAttempts, 0);
+  assert.equal(done.codexUsage.repairCalls, 0);
+  assert.equal(done.failureAnalysis.category, 'infrastructure');
   assert.equal(done.pendingFailure.kind, 'validation');
-  assert.equal(done.pendingFailure.infrastructureError, true);
+  const project = await f.dependencies.projectRepository.get(done.projectId);
+  assert.equal(project.plan.phases.flatMap(phase => phase.tasks).some(task => task.isFix), false);
 });
 
 test('missing dependencies fail safely without running blocked tasks', async t => {

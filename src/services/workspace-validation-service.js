@@ -3,6 +3,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const FLUTTER_CACHE_INFRASTRUCTURE = /read-only file system|(?:^|\b)EROFS\b|engine\.stamp(?:\.tmp[^\s:]*)?|engine\.realm|flutter.{0,100}(?:sdk )?(?:cache|bootstrap|startup).{0,100}(?:permission denied|read-only|failed|error)|(?:sdk )?(?:cache|bootstrap|startup).{0,100}flutter.{0,100}(?:permission denied|read-only|failed|error)/i;
+const FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE = /failed to find\s+\\?["']?(?:which|java|javac)\\?["']?\s+in (?:the )?search path|(?:unable to locate|could not find|failed to locate)\s+(?:a\s+)?(?:java|jdk|jre)(?:\s+(?:runtime|development kit|installation|executable))?|(?:java|jdk|jre)\s+(?:runtime|installation|executable).{0,60}(?:not found|unavailable|could not be found)/i;
 const inside = (root, candidate) => candidate.startsWith(`${root}${path.sep}`);
 
 async function inspectFlutterCache(directory) {
@@ -32,6 +33,22 @@ class SandboxValidationRunner {
       catch { /* Continue through the server-configured PATH. */ }
     }
     return null;
+  }
+  async flutterToolchainAliases() {
+    const aliases = [];
+    for (const name of ['which', 'java']) {
+      const commandPath = path.join('/usr/bin', name);
+      const alternativePath = path.join('/etc/alternatives', name);
+      try {
+        const [commandTarget, alternativeTarget] = await Promise.all([fs.realpath(commandPath), fs.realpath(alternativePath)]);
+        if (commandTarget !== alternativeTarget || !inside('/usr', alternativeTarget)) continue;
+        const info = await fs.stat(alternativeTarget);
+        if (!info.isFile()) continue;
+        await fs.access(alternativeTarget, require('node:fs').constants.X_OK);
+        aliases.push({ target: alternativeTarget, destination: alternativePath });
+      } catch { /* The sandbox only needs aliases actually used by this host. */ }
+    }
+    return aliases;
   }
   async prepareFlutterCache(workspace) {
     const flutterPath = await this.resolveFlutterExecutable();
@@ -80,6 +97,14 @@ class SandboxValidationRunner {
       const readonly = [flutterRoot, javaHome, androidHome, pubCache, '/usr', '/bin', '/lib', '/lib64'];
       for (const directory of [...new Set(readonly.filter(Boolean))]) {
         try { if ((await fs.stat(directory)).isDirectory()) mounts.push('--ro-bind', directory, directory); } catch { /* Optional toolchain/cache directory. */ }
+      }
+      const aliases = await this.flutterToolchainAliases();
+      if (aliases.length) {
+        // Recreate only the Java/which alternative links. Keep host /etc out of
+        // the sandbox and make the synthetic link directories non-writable.
+        mounts.push('--dir', '/etc', '--dir', '/etc/alternatives');
+        for (const alias of aliases) mounts.push('--symlink', alias.target, alias.destination);
+        mounts.push('--chmod', '0555', '/etc/alternatives', '--chmod', '0555', '/etc');
       }
       mounts.push('--bind', privateCache, path.join(flutterRoot, 'bin', 'cache'));
       executable = flutterPath;
@@ -257,7 +282,7 @@ class WorkspaceValidationService {
         try { result = await this.runner.run(workspace, 'flutter', args, { flutterCachePath: cache?.path || null }); }
         catch (error) { result = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
         const evidence = `${result.output || ''}\n${result.error || ''}`;
-        if (!result.passed && FLUTTER_CACHE_INFRASTRUCTURE.test(evidence)) result.infrastructureError = true;
+        if (!result.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(evidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(evidence))) result.infrastructureError = true;
         if (!result.passed && !result.infrastructureError && /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to download (?:gradle|gradle distribution)|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(evidence)) result.infrastructureError = true;
         if (name === 'flutter-test' && result.passed && /(?:no tests ran|no tests found)/i.test(result.output || '')) { result.passed = false; result.error = 'Flutter test command did not run any tests.'; }
         checks.push({ name, ...result });
