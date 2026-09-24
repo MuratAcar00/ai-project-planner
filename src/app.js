@@ -1,4 +1,6 @@
 const express = require('express');
+const { AutonomousModeService } = require('./services/autonomous-mode-service');
+const { JsonFactorySessionRepository } = require('./repositories/json-factory-session-repository');
 const { GeneratedProjectPublisher } = require('./services/generated-project-publisher');
 const { GeneratedAppRuntimeService } = require('./services/generated-app-runtime-service');
 const { runSummary, eventSummary } = require('./autonomous/presentation');
@@ -27,7 +29,7 @@ const summary = project => {
   return { ...project, completedTasks, remainingTasks: tasks.length - completedTasks, progress: tasks.length ? Math.round((completedTasks / tasks.length) * 100) : 0 };
 };
 
-function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate, runtimeService, publisherService } = {}) {
+function createApp({ dataFile, projectRepository, plannerService, executionService, workspaceService, autonomousService, autonomousRunRepository, approvalGate, runtimeService, publisherService, autonomousModeService, sessionRepository } = {}) {
   const app = express();
   const repository = projectRepository || new JsonProjectRepository(dataFile || path.join(__dirname, '..', 'data', 'projects.json'));
   const planning = plannerService || new PlannerService({ providers: [new TemplatePlannerProvider(), new AutonomousPlannerProvider()] });
@@ -44,14 +46,25 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
   app.locals.runtime = runtime;
   const publisher = publisherService || new GeneratedProjectPublisher({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces, runtimeService: runtime });
   app.locals.publisher = publisher;
+  const mode = autonomousModeService || new AutonomousModeService({
+    sessionRepository: sessionRepository || new JsonFactorySessionRepository(path.join(path.dirname(dataFile || repository.filePath || path.join(__dirname, '..', 'data', 'projects.json')), 'autonomous-sessions.json')),
+    autonomousService: autonomous, projectRepository: repository, publisher, executionService: execution
+  });
+  app.locals.autonomousMode = mode;
   const present = async run => runSummary(run, run.projectId ? await repository.get(run.projectId) : null);
-  const ready = Promise.all([execution.initialize(), autonomous.initialize()]);
+  const ready = Promise.all([execution.initialize(), autonomous.initialize(), mode.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
   app.use(express.json({ limit: '100kb' }));
   app.use(express.static(path.join(__dirname, '..', 'public')));
   app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-  app.use(['/api/autonomous', '/api/projects/:id/runtime', '/api/projects/:id/publish'], (req, res, next) => {
+  app.use(['/api/autonomous-mode', '/api/autonomous', '/api/projects/:id/runtime', '/api/projects/:id/publish'], (req, res, next) => {
     if (req.method !== 'POST') return next();
+    if (req.originalUrl.split('?')[0].toLowerCase().startsWith('/api/autonomous-mode')) {
+      let hostname;
+      try { hostname = new URL(`http://${req.get('host')}`).hostname; } catch { /* Reject invalid Host. */ }
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) || !['localhost', '127.0.0.1', '[::1]'].includes(hostname)) return res.status(403).json({ error: 'Autonomous Mode controls are localhost only.' });
+    }
+    if (req.get('sec-fetch-site') === 'cross-site') return res.status(403).json({ error: 'Cross-origin control is disabled.' });
     if (!req.is('application/json')) return res.status(415).json({ error: 'Use application/json.' });
     if (req.get('origin')) {
       try { if (new URL(req.get('origin')).host !== req.get('host')) return res.status(403).json({ error: 'Cross-origin control is disabled.' }); }
@@ -59,11 +72,22 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     }
     next();
   });
+  app.get('/api/autonomous-mode', async (req, res, next) => {
+    try { res.json(await mode.snapshot()); } catch (error) { next(error); }
+  });
+  for (const action of ['start', 'pause', 'resume', 'stop']) app.post(`/api/autonomous-mode/${action}`, async (req, res, next) => {
+    try {
+      if (Object.keys(req.query).length || !req.body || typeof req.body !== 'object' || Array.isArray(req.body) || (action !== 'start' && Object.keys(req.body).length)) return res.status(400).json({ error: 'Unsupported session configuration.' });
+      if (action === 'start') await mode.start(req.body);
+      else await mode.request(action);
+      res.status(202).json(await mode.snapshot());
+    } catch (error) { next(error); }
+  });
   // No command, provider, path, approval or environment input is accepted here.
   app.post('/api/autonomous/start', async (req, res, next) => {
     try {
       try { validateStart(req.body); } catch (error) { return res.status(400).json({ error: error.message }); }
-      const result = await autonomous.start(req.body);
+      const result = await mode.manualStart(req.body);
       res.status(202).json({ ...result, run: await present(result.run) });
     } catch (error) { next(error); }
   });
@@ -90,7 +114,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       if (req.body && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) return res.status(400).json({ error: 'This action takes no configuration.' });
       const current = await autonomous.runRepository.get(req.params.id);
       if (action === 'resume' && current?.needsAttention) return res.status(409).json({ error: 'Needs Attention: trusted operator review is required.' });
-      const run = await autonomous[action](req.params.id);
+      const run = await mode.manualControl(req.params.id, action);
       if (!run) return res.status(404).json({ error: 'Autonomous run not found.' });
       res.status(202).json(await present(run));
     } catch (error) {
@@ -167,7 +191,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       if (!task) return res.status(404).json({ error: 'Task not found.' });
       const provider = req.body && req.body.provider;
       if (provider !== undefined && (typeof provider !== 'string' || !provider.trim() || provider.length > 50)) return res.status(400).json({ error: 'provider must be a non-empty string up to 50 characters.' });
-      const result = await execution.startTask(project, task, { provider: provider || 'template' });
+      const result = await mode.manualTask(() => execution.startTask(project, task, { provider: provider || 'template' }));
       if (result.blocked || result.duplicate) return res.status(409).json(result);
       res.status(202).json(result);
     } catch (e) {
@@ -186,6 +210,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
   app.delete('/api/projects/:id', async (req, res, next) => { try { if ((await repository.get(req.params.id))?.autonomousRunId) return res.status(409).json({ error: 'Autonomous project deletion is disabled.' }); if (!await repository.delete(req.params.id)) return res.status(404).json({ error: 'Project not found.' }); res.status(204).end(); } catch (e) { next(e); } });
   app.use((req, res) => res.status(404).json({ error: 'Route not found.' }));
   app.use((error, req, res, next) => {
+    if (error.safeSessionError) return res.status(error.status).json({ error: error.message });
     if (error.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON.' });
     if (error.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large.' });
     console.error('Request failed.'); res.status(500).json({ error: 'An unexpected server error occurred.' });

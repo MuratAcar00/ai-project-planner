@@ -9,6 +9,7 @@ async function shutdown() {
   if (stopping) return;
   stopping = true;
   server.close();
+  await app.locals.autonomousMode.close();
   await app.locals.runtime.close();
   server.closeAllConnections();
 }

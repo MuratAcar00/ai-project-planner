@@ -354,3 +354,92 @@ operator review; existing project directories are never silently overwritten.
 Publishing tests mock network Git operations. An additional temporary local Git
 repository checks actual commit trees and preservation of staged Factory files;
 no test pushes to GitHub.
+
+### Autonomous Mode
+
+**Generate & Build SaaS** still creates one autonomous run. The new **AUTONOMOUS
+MODE** panel coordinates a bounded sequence through that same pipeline. Choose
+**Max projects** (default **5**, integer **1–10**) and click **Start Autonomous
+Mode** once. Each slot uses the existing local idea generator, history/novelty
+checks, planning, real Codex execution, validator and bounded repair loop. There
+is no alternate frontend pipeline, parallel build, unlimited option or relaxed
+duplicate check. Codex still requires the existing trusted operator configuration
+and execution authorization. Installing this feature does not start a session.
+
+The limit bounds **project attempts**, including failed runs, to prevent a stream
+of failures from generating unlimited work. Progress counts only completed
+projects. At the limit, all successful slots yield `completed`; any failed slots
+yield `needs_attention`, never a misleading 100% completion.
+
+- **Pause** records `pausing`, asks the current run to pause at its existing safe
+  checkpoint, and waits for its in-flight operation to settle before `paused`.
+  It does not kill Codex. It starts no next project.
+- **Resume** uses the same session ID, counters and current run. Paused work
+  resumes through `AutonomousProjectService.resume()`. A completed current run is
+  counted once before the next unique idea is requested.
+- **Stop** records `stopping`, requests the same safe checkpoint and then records
+  `stopped`. It never deletes generated projects or cleans their workspaces. A
+  stopped session cannot resume. Any unfinished run remains paused and can be
+  continued individually through its existing run controls. Finish/recover that
+  run before starting a new session or a different manual build; the single-run
+  pipeline never abandons unfinished work silently.
+- **Needs Attention** blocks new projects and automatic retries. Review the
+  current run and use the existing trusted recovery procedures, then Resume the
+  session. Default **Stop on Needs Attention: ON** stops for any failed run.
+  Turning it OFF permits the next slot only after a terminal application failure;
+  infrastructure problems, paused runs, novelty exhaustion, ambiguous ownership
+  and publishing failures still stop. Repair and idea-batch limits are unchanged.
+
+Session state and the ordered run/project slot history are persisted atomically
+in **`data/autonomous-sessions.json`**, which is ignored by Git. Slots have durable
+request IDs written before calling the existing idempotent run-start API. On
+restart, the coordinator first lets the existing run/execution services reconcile
+interrupted work, then links any start/link crash window by request ID. It never
+starts Codex or publishing automatically on restart: safe completed/paused work
+is shown as **Paused**, and uncertain/missing work as **Needs Attention**. Explicit
+Resume is required. A Ctrl+C/SIGTERM requests a safe checkpoint; a hard crash uses
+the same persisted restart recovery, without guessing that a process succeeded.
+
+**Auto-publish defaults OFF.** Existing **Publish to GitHub** buttons remain
+available. Enabling the checkbox before Start explicitly authorizes automatic
+publishing for this session, using only `GeneratedProjectPublisher`, only for
+completed validated projects, and with its existing fixed destination, secret
+scan, runtime, locking and isolated generated-source boundaries. The coordinator
+cannot choose commands, paths, remotes or branches. A publish failure or restart
+mid-publish requires attention; it is never silently retried. Reconcile/publish
+manually first, then Resume. Pause/Stop during publishing waits for the already
+started publisher operation to settle; it cannot undo an external operation.
+
+Session endpoints (localhost-only POST, JSON, same-origin controls; unknown fields/query options are
+rejected):
+
+```text
+GET  /api/autonomous-mode
+POST /api/autonomous-mode/start
+POST /api/autonomous-mode/pause
+POST /api/autonomous-mode/resume
+POST /api/autonomous-mode/stop
+```
+
+Start accepts only `{ "maxProjects": 5, "stopOnNeedsAttention": true,
+"autoPublish": false }`. Other control bodies must be `{}`. A second active
+session returns **409**, including when the first is paused or needs attention.
+Manual Generate, manual task execution and individual run controls share the
+coordinator lock and cannot bypass an active session. They become available again
+after Stop/completion, subject to the existing unfinished-run guard.
+
+The dashboard shows session status, completed/max progress, failed count, current
+project/stage/task, next action, safe attention messages, session ID/time and an
+ordered project history linking to the existing run cards. Raw execution output
+and credentials are not included in session API responses.
+
+Concurrency guarantees cover **one Factory server process** using serialized
+control operations and a single scheduled poll (one second by default), not a
+busy loop. Do not run multiple Factory writers against the same JSON stores.
+Session tests use isolated repositories, fake execution and injected publishers;
+no real SaaS generation, Codex execution or GitHub push is used. Run the bounded
+three-project and pause/resume smoke tests with:
+
+```bash
+node --test --test-name-pattern='smoke:' test/autonomous-mode.test.js
+```

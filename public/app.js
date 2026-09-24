@@ -82,17 +82,20 @@ function setupFactory() {
   const version = routeVersion;
   let loaded = false;
   let runs = [];
+  let modeActive = false;
   const generate = document.querySelector('#generate');
   generate.disabled = true;
   const refresh = async () => {
     if (version !== routeVersion) return;
     if (busy) { schedule(refresh, version); return; }
     try {
-      const [result, projects] = await Promise.all([api('/api/autonomous'), api('/api/projects')]);
+      const [result, projects, mode] = await Promise.all([api('/api/autonomous'), api('/api/projects'), api('/api/autonomous-mode')]);
       if (version !== routeVersion) return;
       runs = result; loaded = true;
       const active = runs.find(run => !terminal(run));
-      generate.disabled = starting || Boolean(active);
+      modeActive = mode.active;
+      generate.disabled = starting || Boolean(active) || modeActive;
+      renderAutonomousMode(mode, refresh, Boolean(active));
       document.querySelector('#factory-stats').innerHTML = [['Total Projects', projects.length], ['Building', runs.filter(r => !terminal(r) && r.state !== 'paused').length], ['Completed', runs.filter(r => r.state === 'completed').length], ['Needs Attention', runs.filter(r => r.needsAttention || r.state === 'failed').length]].map(([label, count]) => `<div><strong>${count}</strong><span>${label}</span></div>`).join('');
       document.querySelector('#active-run').innerHTML = active ? `<div class="panel active"><h2>${active.state === 'paused' ? 'Your SaaS is paused' : 'Building your SaaS…'}</h2>${badge(active)}<p>Run ID: ${esc(active.id)}</p><p>${esc(active.currentPhase)} · ${esc(active.currentTask || 'Preparing next step')}</p><progress max="100" value="${active.progress}"></progress><p class="metadata">${active.progress}% · Elapsed ${Math.max(0, Math.floor((Date.now() - Date.parse(active.createdAt)) / 60000))} min</p></div>` : '';
       document.querySelector('#autonomous-projects').innerHTML = runs.length ? runs.map(card).join('') : '<p class="muted">Your first app starts here. Generate a SaaS idea and let the pipeline build it.</p>';
@@ -102,7 +105,7 @@ function setupFactory() {
     schedule(refresh, version);
   };
   generate.onclick = async () => {
-    if (starting || !loaded || runs.some(run => !terminal(run))) return;
+    if (starting || !loaded || modeActive || runs.some(run => !terminal(run))) return;
     starting = true; generate.disabled = true;
     const message = document.querySelector('#factory-message');
     try {
@@ -114,7 +117,51 @@ function setupFactory() {
     } catch (error) { message.textContent = error.message; }
     finally { starting = false; await refresh(); }
   };
+  document.querySelector('#mode-form').onsubmit = async event => {
+    event.preventDefault();
+    if (busy || starting || !loaded || modeActive || runs.some(run => !terminal(run))) return;
+    busy = true;
+    document.querySelector('#mode-start').disabled = true;
+    try {
+      await api('/api/autonomous-mode/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        maxProjects: Number(document.querySelector('#mode-max').value), stopOnNeedsAttention: document.querySelector('#mode-attention').checked,
+        autoPublish: document.querySelector('#mode-publish').checked
+      }) });
+      document.querySelector('#factory-message').textContent = 'Autonomous Mode started.';
+    } catch (error) { document.querySelector('#factory-message').textContent = error.message; }
+    finally { busy = false; await refresh(); }
+  };
   refresh();
+}
+function renderAutonomousMode(mode, refresh, hasRun) {
+  const session = mode.session;
+  document.querySelector('#mode-start').disabled = mode.active || hasRun || busy || starting;
+  for (const id of ['mode-max', 'mode-attention', 'mode-publish']) document.querySelector('#' + id).disabled = mode.active;
+  if (mode.active && session) {
+    document.querySelector('#mode-max').value = session.maxProjects;
+    document.querySelector('#mode-attention').checked = session.stopOnNeedsAttention;
+    document.querySelector('#mode-publish').checked = session.autoPublish;
+  }
+  const target = document.querySelector('#mode-status');
+  if (!session) { target.textContent = 'Ready · default 5 projects · auto-publish OFF'; return; }
+  const labels = { running: 'Running', pausing: 'Pausing', paused: 'Paused', stopping: 'Stopping', stopped: 'Stopped', completed: 'Completed', needs_attention: 'Needs Attention', idle: 'Idle' };
+  target.innerHTML = `<h3>Status: ${esc(labels[session.status] || session.status)}</h3><p>${session.completedProjects} / ${session.maxProjects} projects completed · ${session.progress}% · ${session.failedProjects} failed</p>
+    <progress max="100" value="${session.progress}">${session.progress}%</progress>
+    <p>Current: ${esc(session.current?.name || '—')}<br>Current stage: ${esc(session.current?.label || '—')}<br>Current task: ${esc(session.current?.currentTask || '—')}</p>
+    <p>Next action: ${esc(session.nextAction)}</p>${session.lastError ? `<p class="error">${esc(session.lastError)}</p>` : ''}
+    <p class="metadata">Session: ${esc(session.id)} · ${esc(new Date(session.createdAt).toLocaleString())}<br>Stop on Needs Attention: ${session.stopOnNeedsAttention ? 'ON' : 'OFF'} · Auto-publish: ${session.autoPublish ? 'ON' : 'OFF'}</p>
+    <div class="actions">${session.status === 'running' ? '<button data-mode-action="pause">Pause</button>' : ''}${['paused', 'needs_attention'].includes(session.status) ? '<button data-mode-action="resume">Resume</button>' : ''}${mode.active && session.status !== 'stopping' ? '<button data-mode-action="stop">Stop</button>' : ''}</div>
+    <h3>Session projects</h3><ol>${session.projects.map(project => `<li>${project.runId ? `<a href="#/run/${encodeURIComponent(project.runId)}">${esc(project.name)}</a>` : esc(project.name)} — ${esc(project.status)}${session.autoPublish ? ` · ${esc(project.publishStatus)}` : ''}</li>`).join('') || '<li>No project started yet.</li>'}</ol>`;
+  target.querySelectorAll('[data-mode-action]').forEach(button => {
+    button.disabled = busy;
+    button.onclick = async () => {
+      if (busy) return;
+      busy = true; button.disabled = true;
+      try { await post('/api/autonomous-mode/' + button.dataset.modeAction); document.querySelector('#factory-message').textContent = 'Session updated.'; }
+      catch (error) { document.querySelector('#factory-message').textContent = error.message; }
+      finally { busy = false; await refresh(); }
+    };
+  });
 }
 async function runDetail(id) {
   const version = routeVersion;
