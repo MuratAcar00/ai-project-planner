@@ -2,7 +2,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
-const FLUTTER_ARGS = ['create', '--platforms=android,ios', '.'];
+const FLUTTER_ARGS = projectId => ['create', '--platforms=android,ios', '--project-name', projectId.replace(/-/g, '_'), '.'];
 
 class FlutterWorkspaceScaffolder {
   constructor({ workspaceService, projectRepository, runCommand = execFileAsync, timeoutMs = 120000, maxBuffer = 1024 * 1024 } = {}) {
@@ -27,7 +27,7 @@ class FlutterWorkspaceScaffolder {
       return true;
     });
     try {
-      await this.runCommand('flutter', FLUTTER_ARGS, { cwd: workspacePath, shell: false, windowsHide: true, timeout: this.timeoutMs, maxBuffer: this.maxBuffer });
+      await this.runCommand('flutter', FLUTTER_ARGS(project.id), { cwd: workspacePath, shell: false, windowsHide: true, timeout: this.timeoutMs, maxBuffer: this.maxBuffer });
     } catch (error) {
       const message = String(error.stderr || error.message || 'Flutter scaffold command failed.').slice(0, 1500);
       await this.projectRepository.update(project.id, current => {

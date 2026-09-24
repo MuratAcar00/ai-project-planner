@@ -25,7 +25,8 @@ test('mobile scaffold invokes fixed Flutter CLI args with shell disabled and per
   assert.equal(result.prepared, true);
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], 'flutter');
-  assert.deepEqual(calls[0][1], FLUTTER_ARGS);
+  assert.deepEqual(calls[0][1], FLUTTER_ARGS(f.project.id));
+  assert.deepEqual(calls[0][1], ['create', '--platforms=android,ios', '--project-name', 'mobile_project', '.']);
   assert.equal(calls[0][2].shell, false);
   assert.equal(calls[0][2].cwd, await f.workspaceService.getWorkspacePath(f.project.id));
   assert.equal((await f.repository.get(f.project.id)).flutterScaffold.status, 'completed');
