@@ -53,6 +53,11 @@ test('autonomous planner adapts architecture, requirements and tasks to web, mob
   assert.match(plans[0].phases[1].tasks[0].description, /browser interface/);
   assert.match(plans[1].architecture, /Flutter application for both Android and iOS/);
   assert.match(plans[1].phases[1].tasks[0].description, /Android and iOS/);
+  assert.match(plans[1].phases[1].tasks[0].description, /primary user goal and action/);
+  assert.match(plans[1].phases[1].tasks[0].description, /bottom navigation, tabs, or a FAB only when/);
+  assert.match(plans[1].phases[1].tasks[0].description, /Material 3/);
+  assert.match(plans[1].phases[1].tasks[0].description, /common phone sizes/);
+  assert.match(plans[1].architecture, /Avoid default Flutter starter appearance/);
   assert.match(plans[2].architecture, /Share a backend\/API/);
   assert.match(plans[2].phases[0].tasks[0].description, /API contracts/);
   assert.match(plans[2].phases[1].tasks[0].description, /Flutter/);

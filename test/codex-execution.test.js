@@ -51,6 +51,10 @@ test('CodexExecutionProvider has the codex provider name and builds a bounded ta
   const mobilePrompt = buildTaskPrompt(task, { workspacePath: '/tmp/workspace', targetPlatform: 'mobile' });
   assert.match(mobilePrompt, /Flutter application using Dart, targeting Android and iOS/);
   assert.match(mobilePrompt, /do not create a Node\.js\/JavaScript or HTML web application/);
+  assert.match(mobilePrompt, /primary user goal\/action/);
+  assert.match(mobilePrompt, /Material 3/);
+  assert.match(mobilePrompt, /whether bottom navigation, tabs, or a FAB actually help/);
+  assert.match(mobilePrompt, /keyboard and inset behavior/);
 });
 
 test('CodexExecutionProvider requires an absolute, existing workspace directory', async t => {
