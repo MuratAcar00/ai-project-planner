@@ -11,6 +11,13 @@ function runSummary(run, project, { manual = false, canRetryValidation = false }
   const completed = tasks.filter(task => task.completed).length;
   const current = tasks.find(task => task.status === 'running') || tasks.find(task => !task.completed);
   const attention = Boolean(run.needsAttention);
+  const mobile = projectTargetPlatform(project || { targetPlatform: run.selection?.selected?.targetPlatform }) === 'mobile';
+  const latestValidation = run.validationResults?.at(-1);
+  const flutterTest = latestValidation?.checks?.find(check => check.name === 'flutter-test');
+  const apkCheck = latestValidation?.checks?.find(check => check.name === 'android-debug-apk');
+  const apkStatus = latestValidation?.artifactStatus?.androidApk?.status
+    || (apkCheck?.passed ? 'built' : apkCheck ? (apkCheck.infrastructureError ? 'infrastructure-unavailable' : 'build-failed') : 'not-built');
+  const apkLabels = { built: 'Built', 'not-built': 'Not built', 'infrastructure-unavailable': 'Infrastructure unavailable', 'build-failed': 'Build failed' };
   const requestedPlatform = run.platformPreference || run.config?.platformPreference || 'auto';
   const platformPreference = ['auto', 'web', 'mobile', 'web_mobile'].includes(requestedPlatform) ? requestedPlatform : 'auto';
   return { id: run.id, projectId: run.projectId, name: text(project?.name || run.selection?.selected?.name) || 'New SaaS', platformPreference,
@@ -20,6 +27,8 @@ function runSummary(run, project, { manual = false, canRetryValidation = false }
     completedTasks: completed, totalTasks: tasks.length, codexUsage: codexUsage(run), codexBudget: CODEX_BUDGET, currentPhase: text(phases.find(phase => phase.tasks.includes(current))?.name) || labels[run.state],
     currentTask: text(current?.title), fixAttempts: run.fixAttempts || 0, createdAt: run.createdAt,
     completedAt: run.completedAt || null, updatedAt: run.updatedAt,
+    applicationValidationStatus: mobile ? (flutterTest?.passed && latestValidation?.passed ? 'Passed' : flutterTest ? 'Failed' : 'Not run') : null,
+    androidApkStatus: mobile ? (apkLabels[apkStatus] || 'Not built') : null,
     canPause: !['paused', 'completed', 'failed', 'abandoned'].includes(run.state), canResume: run.state === 'paused' && !attention,
     canAbandon: manual && run.state === 'paused' && !attention, canRetryValidation: manual && canRetryValidation,
     blocksNewRun: blocksNewAutonomousRun(run) };

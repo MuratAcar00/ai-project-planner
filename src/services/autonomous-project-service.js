@@ -215,9 +215,10 @@ class AutonomousProjectService {
     const failedCheck = validation.checks?.find(item => item.name === run.pendingFailure.checkName && item.passed === false)
       || validation.checks?.find(item => item.passed === false);
     if (!failedCheck) return null;
-    const infrastructureError = Boolean(run.pendingFailure.infrastructureError || validation.infrastructureError || failedCheck.infrastructureError);
-    const classification = this.failureAnalyzer.analyze({ kind: 'validation', infrastructureError,
-      message: JSON.stringify({ pendingFailure: run.pendingFailure, failedCheck }) });
+    const validationEvidence = { pendingFailure: run.pendingFailure, validation, failedCheck };
+    const classification = this.failureAnalyzer.analyze({ kind: 'validation',
+      infrastructureError: Boolean(run.pendingFailure.infrastructureError || validation.infrastructureError || failedCheck.infrastructureError),
+      message: JSON.stringify(validationEvidence), output: failedCheck.output });
     if (classification.category !== 'infrastructure') return null;
     return { project, validation, failedCheck };
   }
@@ -455,7 +456,7 @@ class AutonomousProjectService {
           await this.move(id, 'testing', { validationResults: [...run.validationResults, record], validationPassed: result.passed === true,
             pendingFailure: result.passed ? null : { kind: 'validation', validationId: record.id, checkName: failedCheck?.name, infrastructureError: Boolean(result.infrastructureError || failedCheck?.infrastructureError), message: JSON.stringify(failedCheck || result).slice(0, 2500) } },
           [[result.passed ? 'validation_passed' : 'validation_failed', { validationId: record.id }]]);
-          if (result.infrastructureError || failedCheck?.infrastructureError) {
+          if (!result.passed && (result.infrastructureError || failedCheck?.infrastructureError)) {
             const failureAnalysis = this.failureAnalyzer.analyze({ kind: 'validation', infrastructureError: true, message: JSON.stringify(failedCheck || result).slice(0, 2500) });
             await this.move(id, 'testing', { failureAnalysis, needsAttention: true }, [['failure_analyzed', failureAnalysis]]);
             await this.projectRepository.update(run.projectId, project => { project.status = 'Needs attention'; return true; });

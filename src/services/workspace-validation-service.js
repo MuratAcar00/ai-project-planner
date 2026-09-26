@@ -5,6 +5,8 @@ const { spawn } = require('node:child_process');
 const FLUTTER_CACHE_INFRASTRUCTURE = /read-only file system|(?:^|\b)EROFS\b|engine\.stamp(?:\.tmp[^\s:]*)?|engine\.realm|flutter.{0,100}(?:sdk )?(?:cache|bootstrap|startup).{0,100}(?:permission denied|read-only|failed|error)|(?:sdk )?(?:cache|bootstrap|startup).{0,100}flutter.{0,100}(?:permission denied|read-only|failed|error)/i;
 const FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE = /failed to find\s+\\?["']?(?:which|java|javac)\\?["']?\s+in (?:the )?search path|(?:unable to locate|could not find|failed to locate)\s+(?:a\s+)?(?:java|jdk|jre)(?:\s+(?:runtime|development kit|installation|executable))?|(?:java|jdk|jre)\s+(?:runtime|installation|executable).{0,60}(?:not found|unavailable|could not be found)/i;
 const JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE = /(?:java\.lang\.)?InternalError:?\s*Error loading java\.security file|(?:error|failed|unable) (?:loading|to load|opening|reading).{0,80}(?:java\.security|java\.policy|nss\.cfg)|(?:java\.security|java\.policy|nss\.cfg).{0,100}(?:not found|no such file|permission denied|read-only file system)/i;
+const GRADLE_DISTRIBUTION_URL = /^https:\/\/services\.gradle\.org\/distributions\/(gradle-(\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9.]+)?)-(bin|all)\.zip)$/;
+const GRADLE_WRAPPER_CACHE_INFRASTRUCTURE = /does not contain any directories\. Expected to find exactly 1 directory/i;
 const inside = (root, candidate) => candidate.startsWith(`${root}${path.sep}`);
 
 async function inspectFlutterCache(directory) {
@@ -20,11 +22,23 @@ async function inspectFlutterCache(directory) {
   }
 }
 
+async function inspectGradleDistribution(directory, makeWritable = false) {
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isSymbolicLink()) throw new Error('Trusted Gradle distribution contains a symbolic link.');
+    const stat = await fs.lstat(target);
+    if (entry.isDirectory()) {
+      if (makeWritable) await fs.chmod(target, stat.mode | 0o700);
+      await inspectGradleDistribution(target, makeWritable);
+    } else if (!entry.isFile()) throw new Error('Trusted Gradle distribution contains an unsupported file type.');
+  }
+}
+
 // No shell, network, host home, credentials or host writable mounts. Generated
 // tests are executable code, so cwd and command allowlisting alone are not a sandbox.
 class SandboxValidationRunner {
-  constructor({ spawnProcess = spawn, timeoutMs = 120000, outputLimit = 16384, flutterExecutable = null } = {}) {
-    Object.assign(this, { spawnProcess, timeoutMs, outputLimit, flutterExecutable });
+  constructor({ spawnProcess = spawn, timeoutMs = 120000, outputLimit = 16384, flutterExecutable = null, gradleCacheRoot = path.join(process.env.HOME || '/nonexistent', '.gradle', 'wrapper', 'dists') } = {}) {
+    Object.assign(this, { spawnProcess, timeoutMs, outputLimit, flutterExecutable, gradleCacheRoot });
   }
   resolveFlutterExecutable() {
     if (this.flutterExecutable) return path.resolve(this.flutterExecutable);
@@ -92,7 +106,71 @@ class SandboxValidationRunner {
     if (!inside(validationRoot, cachePath) || path.basename(cachePath).indexOf('flutter-bin-cache-') !== 0) throw new Error('Refusing to remove a Flutter cache outside the validation workspace.');
     await fs.rm(cachePath, { recursive: true, force: true });
   }
-  async run(workspace, command, args, { flutterCachePath = null } = {}) {
+  async prepareGradleDistribution(workspace) {
+    const workspaceRoot = await fs.realpath(workspace);
+    const propertiesPath = path.join(workspaceRoot, 'android', 'gradle', 'wrapper', 'gradle-wrapper.properties');
+    const properties = await fs.readFile(propertiesPath, 'utf8');
+    const values = properties.split(/\r?\n/).filter(line => line && !/^\s*[#!]/.test(line)).map(line => {
+      const separator = line.search(/[=:]/);
+      return separator < 0 ? null : [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+    }).filter(Boolean);
+    const urls = values.filter(([key]) => key === 'distributionUrl').map(([, value]) => value.replace(/\\([\\:=#! ])/g, '$1'));
+    if (urls.length !== 1) throw new Error('Gradle wrapper must declare exactly one distribution URL.');
+    const match = GRADLE_DISTRIBUTION_URL.exec(urls[0]);
+    if (!match) throw new Error('Gradle wrapper distribution URL is unsupported or unsafe.');
+    const [, archiveName, version, distributionType] = match;
+    const cacheRoot = await fs.realpath(this.gradleCacheRoot);
+    const distributionDir = `gradle-${version}-${distributionType}`;
+    const trustedDistributionDir = path.join(cacheRoot, distributionDir);
+    let distributionInfo;
+    try { distributionInfo = await fs.lstat(trustedDistributionDir); }
+    catch (error) { if (error.code === 'ENOENT') throw new Error(`Trusted offline Gradle distribution ${archiveName} is unavailable.`); throw error; }
+    if (!distributionInfo.isDirectory() || distributionInfo.isSymbolicLink()) throw new Error(`Trusted offline Gradle distribution ${archiveName} is unavailable or unsafe.`);
+    let entries;
+    try { entries = await fs.readdir(trustedDistributionDir, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') throw new Error(`Trusted offline Gradle distribution ${archiveName} is unavailable.`); throw error; }
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-z0-9]+$/.test(entry.name)) continue;
+      const candidateRoot = path.join(trustedDistributionDir, entry.name);
+      const extractedRoot = path.join(candidateRoot, `gradle-${version}`);
+      try {
+        const [hashInfo, archiveInfo, extractedInfo] = await Promise.all([
+          fs.lstat(candidateRoot), fs.lstat(path.join(candidateRoot, archiveName)), fs.lstat(extractedRoot)
+        ]);
+        if (hashInfo.isDirectory() && !hashInfo.isSymbolicLink() && archiveInfo.isFile() && !archiveInfo.isSymbolicLink() &&
+            extractedInfo.isDirectory() && !extractedInfo.isSymbolicLink()) candidates.push({ hash: entry.name, archive: path.join(candidateRoot, archiveName), extracted: extractedRoot });
+      } catch { /* Cache entry does not contain this exact archive. */ }
+    }
+    if (candidates.length !== 1) throw new Error(`Trusted offline Gradle distribution ${archiveName} is unavailable or ambiguous.`);
+    const selected = candidates[0];
+    const markerSource = `${selected.archive}.ok`;
+    if (!(await fs.lstat(markerSource).then(info => info.isFile() && !info.isSymbolicLink(), () => false))) throw new Error(`Trusted offline Gradle distribution ${archiveName} has no completion marker.`);
+    await inspectGradleDistribution(selected.extracted);
+    const privateGradleRoot = path.join(workspaceRoot, '.validation', 'gradle');
+    const privateGradleReal = await fs.realpath(privateGradleRoot);
+    if (!inside(workspaceRoot, privateGradleReal) || !(await fs.stat(privateGradleReal)).isDirectory()) throw new Error('Private Gradle cache is outside the validation workspace.');
+    const target = path.join(privateGradleReal, 'wrapper', 'dists', distributionDir, selected.hash);
+    const existing = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (existing?.isSymbolicLink() || (existing && !existing.isDirectory())) throw new Error('Private Gradle wrapper cache path is unsafe.');
+    if (existing) await fs.rm(target, { recursive: true, force: true });
+    await fs.mkdir(target, { recursive: true, mode: 0o700 });
+    const archiveTarget = path.join(target, archiveName);
+    try {
+      await fs.copyFile(selected.archive, archiveTarget);
+      await fs.chmod(archiveTarget, 0o600);
+      await fs.writeFile(`${archiveTarget}.ok`, '', { mode: 0o600 });
+      const extractedTarget = path.join(target, `gradle-${version}`);
+      await fs.cp(selected.extracted, extractedTarget, { recursive: true, dereference: false, preserveTimestamps: true });
+      await fs.chmod(extractedTarget, (await fs.stat(extractedTarget)).mode | 0o700);
+      await inspectGradleDistribution(extractedTarget, true);
+    } catch (error) {
+      await fs.rm(target, { recursive: true, force: true });
+      throw error;
+    }
+    return { version, distribution: archiveName, hash: selected.hash, path: target };
+  }
+  async run(workspace, command, args, { flutterCachePath = null, gradleDistributionPath = null } = {}) {
     if (!['node', 'npm', 'flutter'].includes(command)) throw new Error('Unsupported validation command.');
     if (command === 'flutter' && !((args.length === 1 && args[0] === 'test') || (args.length === 3 && args[0] === 'build' && args[1] === 'apk' && args[2] === '--debug'))) throw new Error('Unsupported Flutter validation command.');
     const mounts = [];
@@ -320,25 +398,41 @@ class WorkspaceValidationService {
       if ((await fs.lstat(target)).isSymbolicLink() || !(await fs.realpath(target)).startsWith(`${workspace}${path.sep}`)) return { passed: false, infrastructureError: true, checks: [{ name: 'flutter-contract', passed: false, error: 'Unsafe Flutter validation directory.', infrastructureError: true }] };
     }
     let cache;
-    let outcome;
+    let outcome = { passed: false, infrastructureError: false, checks };
     let cleanupError;
     try {
       if (this.runner.prepareFlutterCache) cache = await this.runner.prepareFlutterCache(workspace);
-      for (const [name, args] of [['flutter-test', ['test']], ['android-debug-apk', ['build', 'apk', '--debug']]]) {
-        let result;
-        try { result = await this.runner.run(workspace, 'flutter', args, { flutterCachePath: cache?.path || null }); }
-        catch (error) { result = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
-        const evidence = `${result.output || ''}\n${result.error || ''}`;
-        if (!result.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(evidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(evidence) || JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE.test(evidence))) result.infrastructureError = true;
-        if (!result.passed && !result.infrastructureError && /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to download (?:gradle|gradle distribution)|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(evidence)) result.infrastructureError = true;
-        if (name === 'flutter-test' && result.passed && /(?:no tests ran|no tests found)/i.test(result.output || '')) { result.passed = false; result.error = 'Flutter test command did not run any tests.'; }
-        checks.push({ name, ...result });
-        if (!result.passed) {
-          outcome = { passed: false, infrastructureError: Boolean(result.infrastructureError), checks };
-          break;
+      let testResult;
+      try { testResult = await this.runner.run(workspace, 'flutter', ['test'], { flutterCachePath: cache?.path || null }); }
+      catch (error) { testResult = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
+      const testEvidence = `${testResult.output || ''}\n${testResult.error || ''}`;
+      if (!testResult.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(testEvidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(testEvidence) || JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE.test(testEvidence) || /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to (?:download|downloaded) (?:the )?gradle(?: distribution)?|(?:UnknownHostException|unknown host).{0,100}services\.gradle\.org|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(testEvidence))) testResult.infrastructureError = true;
+      if (testResult.passed && /(?:no tests ran|no tests found)/i.test(testResult.output || '')) { testResult.passed = false; testResult.error = 'Flutter test command did not run any tests.'; }
+      checks.push({ name: 'flutter-test', ...testResult });
+      if (!testResult.passed) {
+        outcome = { passed: false, infrastructureError: Boolean(testResult.infrastructureError), checks };
+      } else {
+        outcome = { passed: true, infrastructureError: false, checks, artifactStatus: { androidApk: { status: 'not-built' } } };
+        let gradleDistribution = null;
+        try {
+          if (typeof this.runner.prepareGradleDistribution !== 'function') throw new Error('Trusted offline Gradle distribution provider is unavailable.');
+          gradleDistribution = await this.runner.prepareGradleDistribution(workspace);
+        } catch (error) {
+          const message = String(error.message || error).slice(0, 1000);
+          checks.push({ name: 'android-debug-apk', passed: false, infrastructureError: true, error: message, output: message });
+          outcome.artifactStatus.androidApk = { status: 'infrastructure-unavailable', message };
+        }
+        if (gradleDistribution) {
+          let apkResult;
+          try { apkResult = await this.runner.run(workspace, 'flutter', ['build', 'apk', '--debug'], { flutterCachePath: cache?.path || null, gradleDistributionPath: gradleDistribution.path }); }
+          catch (error) { apkResult = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
+          const evidence = `${apkResult.output || ''}\n${apkResult.error || ''}`;
+          if (!apkResult.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(evidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(evidence) || JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE.test(evidence) || GRADLE_WRAPPER_CACHE_INFRASTRUCTURE.test(evidence))) apkResult.infrastructureError = true;
+          if (!apkResult.passed && !apkResult.infrastructureError && /(?:android sdk|java|jdk|gradle).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|licenses? (?:not accepted|not been accepted)|failed to (?:download|downloaded) (?:the )?gradle(?: distribution)?|(?:UnknownHostException|unknown host).{0,100}services\.gradle\.org|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(evidence)) apkResult.infrastructureError = true;
+          checks.push({ name: 'android-debug-apk', ...apkResult });
+          outcome.artifactStatus.androidApk = { status: apkResult.passed ? 'built' : apkResult.infrastructureError ? 'infrastructure-unavailable' : 'build-failed', ...(apkResult.error ? { message: String(apkResult.error).slice(0, 1000) } : {}) };
         }
       }
-      if (!outcome) outcome = { passed: true, checks };
     } catch (error) {
       const message = String(error.message || error).slice(0, 1000);
       checks.push({ name: 'flutter-sdk-cache', passed: false, infrastructureError: true, error: message });
@@ -351,6 +445,7 @@ class WorkspaceValidationService {
     }
     if (cleanupError) {
       checks.push({ name: 'flutter-sdk-cache-cleanup', passed: false, infrastructureError: true, error: cleanupError });
+      if (outcome.passed) return { ...outcome, passed: false, infrastructureError: true };
       return { passed: false, infrastructureError: true, checks };
     }
     return outcome;

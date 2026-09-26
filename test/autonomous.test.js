@@ -145,6 +145,40 @@ test('Flutter scaffold setup failure pauses as infrastructure before execution w
   assert.ok(paused.events.some(event => event.type === 'workspace_setup_failed'));
 });
 
+test('Mobile Flutter tests pass and optional APK infrastructure failure still completes without repair budget use', async t => {
+  const f = await fixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate: () => ({ passed: true, infrastructureError: false, artifactStatus: { androidApk: { status: 'infrastructure-unavailable' } }, checks: [
+      { name: 'flutter-test', passed: true, output: '00:00 +17: All tests passed!' },
+      { name: 'android-debug-apk', passed: false, infrastructureError: true, output: 'Gradle wrapper unavailable in offline sandbox.' }
+    ] })
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'completed');
+  assert.equal(done.validationPassed, true);
+  assert.equal(done.needsAttention, undefined);
+  assert.equal(done.fixAttempts, 0);
+  assert.equal(done.codexUsage.repairCalls, 0);
+  assert.equal(done.validationResults.at(-1).artifactStatus.androidApk.status, 'infrastructure-unavailable');
+  assert.equal(f.calls.length, 3);
+  const project = await f.dependencies.projectRepository.get(done.projectId);
+  assert.equal(project.status, 'Completed');
+});
+
+test('Mobile Flutter test failure cannot complete even if optional APK would be available', async t => {
+  const f = await fixture(t, {
+    maxFixAttempts: 0,
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate: () => ({ passed: false, checks: [{ name: 'flutter-test', passed: false, infrastructureError: false, output: 'Expected true in lib/main.dart' }] })
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const done = await finish(f.service, run.id);
+  assert.notEqual(done.state, 'completed');
+  assert.equal(done.validationPassed, false);
+  assert.equal(done.validationResults.at(-1).checks[0].name, 'flutter-test');
+});
+
 test('validation infrastructure recovery retries testing only and preserves completed tasks and Codex usage', async t => {
   let validationCalls = 0;
   const f = await fixture(t, {
@@ -215,6 +249,52 @@ test('validation infrastructure recovery rejects generated-code failures', async
   await assert.rejects(() => f.service.retryValidationInfrastructureFailure(run.id), { status: 409 });
   assert.equal((await f.dependencies.runRepository.get(run.id)).fixAttempts, paused.fixAttempts);
   assert.equal(f.calls.length, 3);
+});
+
+test('persisted Gradle services.gradle.org UnknownHostException enables validation-only retry without budget use', async t => {
+  let validations = 0;
+  const stack = 'java.net.UnknownHostException: services.gradle.org\n\tat org.gradle.wrapper.Download.downloadInternal(Download.java:58)';
+  const f = await fixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate() {
+      validations++;
+      return validations === 1
+        ? { passed: false, infrastructureError: false, checks: [{ name: 'flutter-test', passed: true, output: '17 tests passed' }, { name: 'android-debug-apk', passed: false, infrastructureError: false, output: stack }] }
+        : { passed: true, checks: [{ name: 'flutter-test', passed: true }, { name: 'android-debug-apk', passed: true }] };
+    }
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const paused = await finish(f.service, run.id);
+  const beforeProject = await f.dependencies.projectRepository.get(paused.projectId);
+  const beforeTasks = allTasks(beforeProject).map(task => ({ id: task.id, status: task.status, completed: task.completed }));
+  assert.equal(paused.state, 'paused');
+  assert.equal(paused.pendingFailure.infrastructureError, false);
+  assert.equal(await f.service.canRetryValidationInfrastructureFailure(run.id), true);
+  const eligibleRun = await f.dependencies.runRepository.get(run.id);
+  const evidence = { kind: 'validation', message: JSON.stringify(eligibleRun.validationResults.at(-1)), output: eligibleRun.validationResults.at(-1).checks.at(-1).output };
+  assert.equal(f.service.failureAnalyzer.analyze(evidence).category, 'infrastructure');
+  const budget = { ...paused.codexUsage };
+  const retried = await f.service.retryValidationInfrastructureFailure(run.id);
+  assert.equal(retried.state, 'testing');
+  const completed = await finish(f.service, run.id);
+  assert.equal(completed.state, 'completed');
+  assert.equal(validations, 2);
+  assert.equal(completed.fixAttempts, paused.fixAttempts);
+  assert.deepEqual(completed.codexUsage, budget);
+  assert.deepEqual(allTasks(await f.dependencies.projectRepository.get(paused.projectId)).map(task => ({ id: task.id, status: task.status, completed: task.completed })), beforeTasks);
+});
+
+test('saved ordinary generated-code validation failure remains ineligible for retry', async t => {
+  const f = await fixture(t, {
+    flutterScaffolder: { async prepare() { return { prepared: true }; } },
+    validate: () => ({ passed: false, infrastructureError: false, checks: [{ name: 'flutter-test', passed: true }, { name: 'android-debug-apk', passed: false, infrastructureError: false, output: 'Gradle task assembleDebug failed: Dart compilation error in lib/main.dart' }] })
+  });
+  const { run } = await f.service.start({ platformPreference: 'mobile' });
+  const paused = await finish(f.service, run.id);
+  assert.equal(paused.pendingFailure.infrastructureError, false);
+  assert.equal(await f.service.canRetryValidationInfrastructureFailure(run.id), false);
+  await assert.rejects(() => f.service.retryValidationInfrastructureFailure(run.id), { status: 409 });
+  assert.equal((await f.dependencies.runRepository.get(run.id)).fixAttempts, paused.fixAttempts);
 });
 
 test('manual start preserves but does not treat non-resumable setup failure as active', async t => {
@@ -620,6 +700,20 @@ test('Flutter toolchain discovery failure pauses without consuming repair budget
 test('JDK security configuration failure pauses without creating a repair task or spending budget', async t => {
   const output = 'Exception in thread "main" java.lang.InternalError: Error loading java.security file';
   const f = await fixture(t, { validate: () => ({ passed: false, checks: [{ name: 'android-debug-apk', passed: false, exitCode: 1, infrastructureError: false, output }] }) });
+  const { run } = await f.service.start();
+  const done = await finish(f.service, run.id);
+  assert.equal(done.state, 'paused');
+  assert.equal(done.needsAttention, true);
+  assert.equal(done.fixAttempts, 0);
+  assert.equal(done.codexUsage.repairCalls, 0);
+  assert.equal(done.failureAnalysis.category, 'infrastructure');
+  const project = await f.dependencies.projectRepository.get(done.projectId);
+  assert.equal(project.plan.phases.flatMap(phase => phase.tasks).some(task => task.isFix), false);
+});
+
+test('Gradle wrapper bootstrap infrastructure failure creates no repair task and spends no repair budget', async t => {
+  const output = 'java.net.UnknownHostException: services.gradle.org\nGradle wrapper Download.downloadInternal';
+  const f = await fixture(t, { validate: () => ({ passed: false, infrastructureError: true, checks: [{ name: 'android-debug-apk', passed: false, exitCode: 1, signal: null, timedOut: false, infrastructureError: true, output }] }) });
   const { run } = await f.service.start();
   const done = await finish(f.service, run.id);
   assert.equal(done.state, 'paused');

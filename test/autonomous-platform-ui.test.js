@@ -15,6 +15,8 @@ test('single-project dashboard offers only the four safe platform preferences an
   assert.match(source, /run\.canAbandon[\s\S]*data-action="abandon"/);
   assert.match(source, /window\.confirm\('Abandon this paused run\?/);
   assert.match(source, /run\.canRetryValidation[\s\S]*Retry Validation/);
+  assert.match(source, /Application validation:/);
+  assert.match(source, /Android APK:/);
   assert.match(source, /window\.confirm\('Retry validation for this run\?/);
   assert.match(source, /\/api\/autonomous\/\$\{encodeURIComponent\(button\.dataset\.run\)\}\/\$\{button\.dataset\.action\}/);
 });

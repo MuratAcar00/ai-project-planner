@@ -2,6 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
 const { fixture, finish } = require('./autonomous-helpers');
 const { GeneratedAppRuntimeService } = require('../src/services/generated-app-runtime-service');
 const { createApp } = require('../src/app');
@@ -134,4 +136,100 @@ test('multiple completed apps get distinct ports and unexpected exit clears runt
   await f.runtime.cleanup(secondId, entry);
   assert.equal((await f.runtime.status(secondId)).status, 'stopped');
   assert.equal((await f.runtime.status(f.id)).status, 'running');
+});
+
+function fakeFlutterProcess() {
+  const child = new EventEmitter();
+  child.pid = 41001;
+  child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.signals = [];
+  child.kill = signal => { child.signals.push(signal); setImmediate(() => child.emit('close', null, signal)); return true; };
+  setImmediate(() => child.emit('spawn'));
+  return child;
+}
+
+async function mobileFixture(t, { devices = [
+  { id: 'linux', name: 'Linux desktop', targetPlatform: 'linux-x64' },
+  { id: 'android-unique-92', name: 'Pixel emulator', targetPlatform: 'android-x64', emulator: true },
+  { id: 'phone-abc', name: 'Android phone', targetPlatform: 'android-arm64' },
+  { id: 'chrome', name: 'Chrome', targetPlatform: 'web-javascript' }
+], launchError = false } = {}) {
+  const f = await setup(t);
+  await f.dependencies.projectRepository.update(f.id, project => { project.targetPlatform = 'mobile'; return true; });
+  await fs.rm(f.workspace, { recursive: true, force: true });
+  for (const dir of ['lib', 'android', 'ios/Runner.xcodeproj', 'test']) await fs.mkdir(path.join(f.workspace, dir), { recursive: true });
+  for (const file of ['pubspec.yaml', 'lib/main.dart', 'ios/Runner.xcodeproj/project.pbxproj', 'test/app_test.dart']) await fs.writeFile(path.join(f.workspace, file), 'fixture');
+  const calls = [];
+  const runtime = new GeneratedAppRuntimeService({ ...f.dependencies, startupMs: 200, flutterExecutable: '/opt/flutter/bin/flutter',
+    deviceDiscovery: async flutter => { calls.push({ kind: 'devices', flutter }); return devices; },
+    spawnProcess: (command, args, options) => { calls.push({ kind: 'spawn', command, args, options }); if (launchError) { const child = new EventEmitter(); child.pid = 41002; child.stdout = new PassThrough(); child.stderr = new PassThrough(); setImmediate(() => { child.stderr.write('Gradle start failed'); child.emit('close', 1, null); }); child.kill = () => true; return child; } return fakeFlutterProcess(); }
+  });
+  t.after(() => runtime.close());
+  return { ...f, runtime, calls };
+}
+
+test('mobile runtime selects an Android emulator, ignores desktop and web, and launches in the project workspace', async t => {
+  const f = await mobileFixture(t);
+  const result = await f.runtime.start(f.id);
+  const launch = f.calls.find(call => call.kind === 'spawn');
+  assert.deepEqual(launch.args, ['run', '-d', 'android-unique-92']);
+  assert.equal(launch.options.cwd, f.workspace);
+  assert.equal(launch.options.shell, false);
+  assert.equal(result.targetPlatform, 'mobile');
+  assert.equal(result.deviceId, 'android-unique-92');
+  assert.equal(result.deviceName, 'Pixel emulator');
+  assert.equal(result.url, null);
+  assert.equal(result.status, 'running');
+  const status = await f.runtime.status(f.id);
+  assert.equal(status.status, 'running');
+  assert.equal(status.targetPlatform, 'mobile');
+  assert.equal(status.deviceId, 'android-unique-92');
+  assert.equal(status.url, null);
+});
+
+test('mobile runtime API presents device metadata without a web URL', async t => {
+  const f = await mobileFixture(t);
+  await f.runtime.start(f.id);
+  const app = createApp({ projectRepository: f.dependencies.projectRepository, executionService: f.dependencies.executionService,
+    workspaceService: f.dependencies.workspaceService, autonomousService: f.service, runtimeService: f.runtime });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  const status = await (await fetch(`http://127.0.0.1:${server.address().port}/api/projects/${f.id}/runtime`)).json();
+  assert.equal(status.status, 'running');
+  assert.equal(status.targetPlatform, 'mobile');
+  assert.equal(status.deviceName, 'Pixel emulator');
+  assert.equal(status.deviceId, 'android-unique-92');
+  assert.equal(status.url, null);
+});
+
+test('mobile runtime chooses an available Android device without assuming an emulator ID', async t => {
+  const f = await mobileFixture(t, { devices: [{ id: 'boot-dependent-77', name: 'Android device', targetPlatform: 'android-arm64' }] });
+  assert.equal((await f.runtime.start(f.id)).deviceId, 'boot-dependent-77');
+  assert.deepEqual(f.calls.find(call => call.kind === 'spawn').args, ['run', '-d', 'boot-dependent-77']);
+});
+
+test('mobile runtime reports missing Android devices and never attempts iOS', async t => {
+  const f = await mobileFixture(t, { devices: [{ id: 'linux', targetPlatform: 'linux-x64' }, { id: 'ios', targetPlatform: 'ios' }, { id: 'chrome', targetPlatform: 'web-javascript' }] });
+  await assert.rejects(() => f.runtime.start(f.id), /No Android device or emulator is available/);
+  assert.equal((await f.runtime.status(f.id)).status, 'stopped');
+  assert.equal(f.calls.some(call => call.kind === 'spawn' && call.args[0] === 'run'), false);
+});
+
+test('duplicate mobile starts are rejected and stop signals only the owned flutter process', async t => {
+  const f = await mobileFixture(t);
+  const starting = f.runtime.start(f.id);
+  assert.throws(() => f.runtime.start(f.id), /operation already/);
+  await starting;
+  const child = f.runtime.registry.get(f.id).child;
+  assert.equal((await f.runtime.stop(f.id)).status, 'stopped');
+  assert.deepEqual(child.signals, ['SIGINT']);
+  assert.equal(f.calls.filter(call => call.kind === 'spawn' && call.args[0] === 'run').length, 1);
+});
+
+test('failed flutter launch clears runtime state and is not presented as running', async t => {
+  const f = await mobileFixture(t, { launchError: true });
+  await assert.rejects(() => f.runtime.start(f.id), /Flutter launch failed.*Gradle start failed/);
+  assert.equal((await f.runtime.status(f.id)).status, 'stopped');
+  assert.equal(f.runtime.registry.has(f.id), false);
 });

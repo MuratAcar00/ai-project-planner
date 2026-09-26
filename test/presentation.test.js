@@ -34,6 +34,8 @@ test('summaries resolve current phase/task and timeline without serializing evid
   assert.equal(dto.currentPhase, 'Backend');
   assert.equal(dto.currentTask, 'Tests');
   assert.equal(dto.progress, 50);
+  assert.equal(dto.applicationValidationStatus, null);
+  assert.equal(dto.androidApkStatus, null);
   assert.equal(dto.completedTasks, 1);
   assert.deepEqual(runSummary({ state: 'completed' }).codexUsage, { codexCallsTotal: 0, buildCalls: 0, repairCalls: 0, failedCalls: 0 });
   assert.deepEqual(runSummary({ state: 'completed' }).codexBudget, { buildCalls: 3, repairCalls: 2 });
@@ -45,4 +47,16 @@ test('summaries resolve current phase/task and timeline without serializing evid
   assert.equal(JSON.stringify(event).includes('PRIVATE'), false);
   const noProgress = eventSummary({ id: 'event-no-progress', type: 'repair_no_progress', reason: 'Repair made no progress: failure and workspace are unchanged.', timestamp: '2026-01-01T00:00:00Z' }, run, project);
   assert.equal(noProgress.message, 'Repair made no progress: failure and workspace are unchanged.');
+});
+
+test('mobile run summary separates required application validation from optional APK artifact status', () => {
+  const project = { targetPlatform: 'mobile', plan: { phases: [] } };
+  const run = { state: 'completed', validationResults: [{ passed: true,
+    checks: [{ name: 'flutter-test', passed: true }, { name: 'android-debug-apk', passed: false, infrastructureError: true }],
+    artifactStatus: { androidApk: { status: 'infrastructure-unavailable' } } } ] };
+  const dto = runSummary(run, project);
+  assert.equal(dto.applicationValidationStatus, 'Passed');
+  assert.equal(dto.androidApkStatus, 'Infrastructure unavailable');
+  assert.equal(runSummary({ ...run, validationResults: [{ passed: false, checks: [{ name: 'flutter-test', passed: false }] }] }, project).applicationValidationStatus, 'Failed');
+  assert.equal(runSummary({ state: 'testing' }, project).androidApkStatus, 'Not built');
 });

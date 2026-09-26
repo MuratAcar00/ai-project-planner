@@ -29,11 +29,14 @@ async function flutterValidationFixture(t, result) {
     await fs.writeFile(target, file.endsWith('.yaml') ? 'name: fixture\n' : '// fixture');
   }
   await fs.mkdir(path.join(workspace, 'android'), { recursive: true });
+  await fs.mkdir(path.join(workspace, 'android', 'gradle', 'wrapper'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'android', 'gradle', 'wrapper', 'gradle-wrapper.properties'), 'distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-all.zip\n');
   await f.dependencies.projectRepository.create({ id: projectId, targetPlatform: 'mobile' });
   const calls = [];
   const cachePath = path.join(workspace, '.validation', 'fake-flutter-cache');
   const runner = {
     async prepareFlutterCache() { await fs.mkdir(cachePath, { recursive: true }); return { path: cachePath }; },
+    async prepareGradleDistribution() { return { version: '9.3.1', distribution: 'gradle-9.3.1-all.zip', path: path.join(workspace, '.validation', 'gradle', 'wrapper', 'dists', 'gradle-9.3.1-all', 'fakehash') }; },
     async cleanupFlutterCache() { await fs.rm(cachePath, { recursive: true, force: true }); },
     async run(cwd, command, args, options) { calls.push({ cwd, command, args, options }); return result ? result(command, args) : { passed: true, output: 'All tests passed' }; }
   };
@@ -46,23 +49,46 @@ test('mobile validation runs Flutter tests followed by the Android debug APK bui
   const result = await f.validation.validate({ projectId: f.projectId });
   assert.equal(result.passed, true);
   assert.deepEqual(result.checks.map(check => check.name), ['flutter-test', 'android-debug-apk']);
+  assert.deepEqual(result.artifactStatus, { androidApk: { status: 'built' } });
   assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['flutter', ['test']], ['flutter', ['build', 'apk', '--debug']]]);
   assert.ok(f.calls.every(call => call.cwd === f.workspace));
   assert.ok(f.calls.every(call => call.options.flutterCachePath === path.join(f.workspace, '.validation', 'fake-flutter-cache')));
   assert.equal(await fs.stat(path.join(f.workspace, '.validation', 'fake-flutter-cache')).then(() => true, () => false), false);
 });
 
-test('Flutter generated-code failures remain repairable while toolchain failures are infrastructure', async t => {
+test('Flutter tests remain required while APK application failures are diagnostic only', async t => {
   const appFailure = await flutterValidationFixture(t, (_command, args) => ({ passed: args[0] !== 'build', output: args[0] === 'build' ? 'Gradle task assembleDebug failed: Dart compilation error in lib/main.dart' : 'All tests passed' }));
   const applicationResult = await appFailure.validation.validate({ projectId: appFailure.projectId });
-  assert.equal(applicationResult.passed, false);
-  assert.equal(applicationResult.infrastructureError, false);
+  assert.equal(applicationResult.passed, true);
   assert.equal(applicationResult.checks.at(-1).name, 'android-debug-apk');
+  assert.deepEqual(applicationResult.artifactStatus, { androidApk: { status: 'build-failed' } });
   const toolchain = await flutterValidationFixture(t, () => ({ passed: false, output: 'Android SDK not found. Define a valid SDK location.' }));
   const infrastructureResult = await toolchain.validation.validate({ projectId: toolchain.projectId });
   assert.equal(infrastructureResult.infrastructureError, true);
   assert.equal(infrastructureResult.checks[0].name, 'flutter-test');
   assert.equal(toolchain.calls.length, 1);
+});
+
+test('Flutter test failure blocks application validation and skips optional APK build', async t => {
+  const f = await flutterValidationFixture(t, (_command, args) => ({ passed: false, output: args[0] === 'test' ? 'Expected true but was false in lib/main.dart' : '' }));
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.passed, false);
+  assert.equal(result.infrastructureError, false);
+  assert.equal(result.checks.length, 1);
+  assert.equal(result.checks[0].name, 'flutter-test');
+  assert.equal(f.calls.length, 1);
+});
+
+test('APK Gradle infrastructure failure is optional and recorded while application validation passes', async t => {
+  const f = await flutterValidationFixture(t, (_command, args) => args[0] === 'build'
+    ? { passed: false, infrastructureError: true, exitCode: 1, output: 'Gradle wrapper unavailable in offline sandbox.' }
+    : { passed: true, output: '00:00 +17: All tests passed!' });
+  const result = await f.validation.validate({ projectId: f.projectId });
+  assert.equal(result.passed, true);
+  assert.equal(result.infrastructureError, false);
+  assert.equal(result.checks[0].passed, true);
+  assert.equal(result.checks[1].infrastructureError, true);
+  assert.deepEqual(result.artifactStatus, { androidApk: { status: 'infrastructure-unavailable' } });
 });
 
 test('Flutter SDK read-only cache/bootstrap errors are classified as infrastructure before APK build', async t => {
@@ -81,8 +107,8 @@ test('Flutter Java and which discovery failures are classified as infrastructure
     ? { passed: false, exitCode: 1, output }
     : { passed: true, output: 'All tests passed' });
   const result = await f.validation.validate({ projectId: f.projectId });
-  assert.equal(result.passed, false);
-  assert.equal(result.infrastructureError, true);
+  assert.equal(result.passed, true);
+  assert.equal(result.infrastructureError, false);
   assert.equal(result.checks[0].passed, true);
   assert.equal(result.checks[1].name, 'android-debug-apk');
   assert.equal(result.checks[1].infrastructureError, true);
@@ -94,8 +120,8 @@ test('JDK security configuration startup failures are classified as infrastructu
     ? { passed: false, exitCode: 1, signal: null, timedOut: false, output }
     : { passed: true, output: 'All tests passed' });
   const result = await f.validation.validate({ projectId: f.projectId });
-  assert.equal(result.passed, false);
-  assert.equal(result.infrastructureError, true);
+  assert.equal(result.passed, true);
+  assert.equal(result.infrastructureError, false);
   assert.equal(result.checks[1].name, 'android-debug-apk');
   assert.equal(result.checks[1].infrastructureError, true);
 });
@@ -108,6 +134,129 @@ test('Flutter SDK cache seeding failure is infrastructure and launches no valida
   assert.equal(result.infrastructureError, true);
   assert.equal(result.checks[0].name, 'flutter-sdk-cache');
   assert.equal(f.calls.length, 0);
+});
+
+test('Gradle wrapper URL selects and privately seeds only its exact trusted cached distribution', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gradle-cache-sandbox-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  const cacheRoot = path.join(root, 'trusted', 'wrapper', 'dists');
+  const hash = 'abc123trusted';
+  const source = path.join(cacheRoot, 'gradle-9.3.1-all', hash);
+  await fs.mkdir(path.join(workspace, 'android', 'gradle', 'wrapper'), { recursive: true });
+  await fs.mkdir(source, { recursive: true });
+  await fs.mkdir(path.join(source, 'gradle-9.3.1', 'bin'), { recursive: true });
+  await fs.mkdir(path.join(workspace, '.validation', 'gradle'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'android', 'gradle', 'wrapper', 'gradle-wrapper.properties'), 'distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-all.zip\n');
+  await fs.writeFile(path.join(source, 'gradle-9.3.1-all.zip'), 'trusted archive');
+  await fs.writeFile(path.join(source, 'gradle-9.3.1-all.zip.ok'), '');
+  await fs.writeFile(path.join(source, 'gradle-9.3.1', 'bin', 'gradle'), '#!/bin/sh\n');
+  await fs.chmod(path.join(source, 'gradle-9.3.1', 'bin', 'gradle'), 0o755);
+  const sourceBefore = {
+    archive: await fs.readFile(path.join(source, 'gradle-9.3.1-all.zip'), 'utf8'),
+    executableMode: (await fs.stat(path.join(source, 'gradle-9.3.1', 'bin', 'gradle'))).mode & 0o777,
+    distributionMode: (await fs.stat(path.join(source, 'gradle-9.3.1'))).mode & 0o777
+  };
+  const runner = new SandboxValidationRunner({ gradleCacheRoot: cacheRoot });
+  const selected = await runner.prepareGradleDistribution(workspace);
+  assert.equal(selected.version, '9.3.1');
+  assert.equal(selected.distribution, 'gradle-9.3.1-all.zip');
+  assert.equal(await fs.readFile(path.join(selected.path, selected.distribution), 'utf8'), 'trusted archive');
+  assert.equal(await fs.readFile(path.join(selected.path, 'gradle-9.3.1', 'bin', 'gradle'), 'utf8'), '#!/bin/sh\n');
+  assert.equal((await fs.stat(path.join(selected.path, 'gradle-9.3.1', 'bin', 'gradle'))).mode & 0o111, 0o111);
+  assert.equal((await fs.stat(path.join(selected.path, 'gradle-9.3.1'))).mode & 0o700, 0o700);
+  assert.notEqual(selected.path, source);
+  assert.equal((await fs.stat(path.join(selected.path, selected.distribution))).mode & 0o777, 0o600);
+  assert.deepEqual({
+    archive: await fs.readFile(path.join(source, 'gradle-9.3.1-all.zip'), 'utf8'),
+    executableMode: (await fs.stat(path.join(source, 'gradle-9.3.1', 'bin', 'gradle'))).mode & 0o777,
+    distributionMode: (await fs.stat(path.join(source, 'gradle-9.3.1'))).mode & 0o777
+  }, sourceBefore);
+  let invocation;
+  runner.flutterExecutable = '/tmp/flutter/bin/flutter';
+  runner.resolveFlutterExecutable = async () => '/tmp/flutter/bin/flutter';
+  runner.flutterToolchainAliases = async () => [];
+  runner.flutterJavaSecurityConfigDirectories = async () => [];
+  runner.spawnProcess = (_command, args, options) => {
+    invocation = { args, options };
+    const process = child();
+    setImmediate(() => process.emit('close', 0, null));
+    return process;
+  };
+  const flutterCachePath = path.join(workspace, '.validation', 'fake-flutter-cache');
+  await fs.mkdir(flutterCachePath);
+  await runner.run(workspace, 'flutter', ['build', 'apk', '--debug'], { flutterCachePath, gradleDistributionPath: selected.path });
+  assert.equal(invocation.args.some((value, index) => ['--bind', '--ro-bind'].includes(value) && invocation.args[index + 1]?.startsWith(path.join(root, 'trusted'))), false);
+  assert.equal(invocation.args.some((value, index) => value === '--bind' && invocation.args[index + 1] === root), false);
+  assert.equal(invocation.options.shell, false);
+  assert.ok(invocation.args.includes('--unshare-all'));
+});
+
+test('Gradle archive without the extracted distribution is insufficient for offline wrapper cache', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'gradle-partial-cache-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  const hash = 'trustedhash';
+  const source = path.join(root, 'trusted', 'gradle-9.3.1-all', hash);
+  await fs.mkdir(path.join(workspace, 'android', 'gradle', 'wrapper'), { recursive: true });
+  await fs.mkdir(source, { recursive: true });
+  await fs.mkdir(path.join(workspace, '.validation', 'gradle'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'android', 'gradle', 'wrapper', 'gradle-wrapper.properties'), 'distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-all.zip\n');
+  await fs.writeFile(path.join(source, 'gradle-9.3.1-all.zip'), 'archive only');
+  await fs.writeFile(path.join(source, 'gradle-9.3.1-all.zip.ok'), '');
+  const runner = new SandboxValidationRunner({ gradleCacheRoot: path.join(root, 'trusted') });
+  await assert.rejects(() => runner.prepareGradleDistribution(workspace), /unavailable or ambiguous/);
+  assert.equal(await fs.stat(path.join(workspace, '.validation', 'gradle', 'wrapper', 'dists')).then(() => true, () => false), false);
+  assert.equal(await fs.readFile(path.join(source, 'gradle-9.3.1-all.zip'), 'utf8'), 'archive only');
+});
+
+test('Gradle wrapper missing extracted-directory error is infrastructure while application compile errors remain repairable', async () => {
+  const { FailureAnalyzer } = require('../src/services/failure-analyzer');
+  const analyzer = new FailureAnalyzer();
+  assert.equal(analyzer.analyze({ kind: 'validation', message: "Gradle distribution '/workspace/.validation/gradle/wrapper/dists/gradle-9.3.1-all/hash' does not contain any directories. Expected to find exactly 1 directory." }).category, 'infrastructure');
+  assert.equal(analyzer.analyze({ kind: 'validation', message: 'Gradle task assembleDebug failed: Dart compilation error in lib/main.dart' }).category, 'validation');
+});
+
+test('missing or unsafe Gradle distributions remain optional APK infrastructure diagnostics', async t => {
+  for (const { url, expected } of [
+    { url: 'https\\://services.gradle.org/distributions/gradle-8.9-bin.zip', expected: /unavailable/ },
+    { url: 'https\\://evil.example/gradle-9.3.1-all.zip', expected: /unsupported or unsafe/ },
+    { url: 'file\\:///tmp/gradle-9.3.1-all.zip', expected: /unsupported or unsafe/ },
+    { url: 'https\\://services.gradle.org/distributions/../../host.zip', expected: /unsupported or unsafe/ }
+  ]) {
+    const f = await flutterValidationFixture(t);
+    f.validation.runner.prepareGradleDistribution = SandboxValidationRunner.prototype.prepareGradleDistribution.bind(f.validation.runner);
+    await fs.writeFile(path.join(f.workspace, 'android', 'gradle', 'wrapper', 'gradle-wrapper.properties'), `distributionUrl=${url}\n`);
+    const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gradle-cache-missing-test-'));
+    t.after(() => fs.rm(cacheRoot, { recursive: true, force: true }));
+    f.validation.runner.gradleCacheRoot = cacheRoot;
+    const result = await f.validation.validate({ projectId: f.projectId });
+    assert.equal(result.passed, true);
+    assert.equal(result.infrastructureError, false);
+    assert.equal(result.checks.at(-1).name, 'android-debug-apk');
+    assert.equal(result.checks.at(-1).infrastructureError, true);
+    assert.match(result.checks.at(-1).error, expected);
+    assert.deepEqual(result.artifactStatus, { androidApk: { status: 'infrastructure-unavailable', message: result.checks.at(-1).error } });
+    assert.deepEqual(f.calls.map(call => call.args), [['test']]);
+  }
+});
+
+test('Gradle wrapper network and distribution download failures are infrastructure', async t => {
+  for (const output of [
+    'java.net.UnknownHostException: services.gradle.org',
+    'Failed to download Gradle distribution https://services.gradle.org/distributions/gradle-9.3.1-all.zip',
+    "Gradle distribution '/workspace/.validation/gradle/wrapper/dists/gradle-9.3.1-all/hash' does not contain any directories. Expected to find exactly 1 directory."
+  ]) {
+    const f = await flutterValidationFixture(t, (_command, args) => args[0] === 'build'
+      ? { passed: false, exitCode: 1, output }
+      : { passed: true, output: 'All tests passed' });
+    f.validation.runner.prepareGradleDistribution = async () => ({ version: '9.3.1', distribution: 'gradle-9.3.1-all.zip', path: path.join(f.workspace, '.validation', 'gradle') });
+    const result = await f.validation.validate({ projectId: f.projectId });
+    assert.equal(result.passed, true);
+    assert.equal(result.infrastructureError, false);
+    assert.equal(result.checks[1].infrastructureError, true);
+    assert.equal(f.calls.length, 2);
+  }
 });
 
 test('validation runs offline install, syntax checks, tests and startup health with fixed arguments', async t => {
