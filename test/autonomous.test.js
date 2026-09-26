@@ -665,6 +665,18 @@ test('restart recovery pauses interrupted runs without executing anything', asyn
   assert.equal(f.calls.length, 0);
 });
 
+test('direct resume cannot bypass repair budget and no-progress stops', async t => {
+  const f = await fixture(t);
+  for (const type of ['codex_budget_exhausted', 'repair_no_progress']) {
+    const id = `attention-${type}`;
+    await f.dependencies.runRepository.create({ id, state: 'paused', resumeState: 'fixing',
+      needsAttention: true, projectId: null, config: {}, events: [{ type }] });
+    await assert.rejects(() => f.service.resume(id), /Needs Attention/);
+    assert.equal((await f.dependencies.runRepository.get(id)).state, 'paused');
+  }
+  assert.equal(f.service.jobs.size, 0);
+});
+
 test('restart reconciles project creation window rather than creating a duplicate', async t => {
   const f = await fixture(t);
   const { run } = await f.service.start();

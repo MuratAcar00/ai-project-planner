@@ -110,6 +110,11 @@ class AutonomousProjectService {
       const stored = await this.runRepository.get(id);
       if (!stored) return null;
       if (stored.state !== 'paused' || this.jobs.has(id)) throw new Error('Run must be paused and its current operation must have settled.');
+      const lastStop = (stored.events || []).filter(item => ['codex_budget_exhausted', 'repair_no_progress',
+        'operator_repair_granted', 'operator_review_acknowledged', 'infrastructure_recovered', 'run_resumed'].includes(item.type)).at(-1);
+      if (stored.needsAttention && ['codex_budget_exhausted', 'repair_no_progress'].includes(lastStop?.type)) {
+        throw new Error('Needs Attention: complete trusted recovery before resuming.');
+      }
       const result = await this.runRepository.update(id, run => {
         run.state = run.resumeState || 'idle';
         run.pauseReason = null;
