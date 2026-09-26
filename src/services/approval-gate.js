@@ -4,7 +4,7 @@ const LOCAL_ACTIONS = new Set(['generate_ideas', 'plan_project', 'workspace_code
 class ApprovalGate {
   constructor({ allowCodexExecution = false } = {}) { this.allowCodexExecution = allowCodexExecution === true; }
   check(action) {
-    const allowed = LOCAL_ACTIONS.has(action) || (action === 'codex_execution' && this.allowCodexExecution);
+    const allowed = LOCAL_ACTIONS.has(action) || (['codex_execution', 'operator_recovery', 'operator_repair_grant'].includes(action) && this.allowCodexExecution);
     return { action, allowed, reason: allowed ? 'Authorized local operation.' : 'Denied by default; explicit operator approval is required.' };
   }
 }

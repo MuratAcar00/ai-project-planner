@@ -137,6 +137,14 @@ class AutonomousModeService {
       const run = await this.autonomousService.runRepository.get(id);
       if (action === 'abandon' && !await this.isManualRun(id)) throw fail('Only manual autonomous runs can be abandoned.');
       if (action === 'retryValidation' && !await this.isManualRun(id)) throw fail('Only manual autonomous runs can retry validation.');
+      if (action === 'recover') {
+        if (!await this.isManualRun(id)) throw fail('Only manual autonomous runs can acknowledge attention.');
+        return this.autonomousService.acknowledgeAttention(id);
+      }
+      if (action === 'grantRepair') {
+        if (!await this.isManualRun(id)) throw fail('Only manual autonomous runs can receive repair grants.');
+        return this.autonomousService.grantRepair(id);
+      }
       if (action === 'resume' && run?.needsAttention) throw fail('Needs Attention: trusted operator review is required.');
       if (action === 'retryValidation') return this.autonomousService.retryValidationInfrastructureFailure(id);
       return this.autonomousService[action](id);

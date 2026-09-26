@@ -5,7 +5,7 @@ const { CODEX_BUDGET } = require('./codex-budget');
 const { projectTargetPlatform } = require('./platform');
 const { blocksNewAutonomousRun } = require('../services/autonomous-project-service');
 const codexUsage = run => Object.fromEntries(['codexCallsTotal', 'buildCalls', 'repairCalls', 'failedCalls'].map(key => [key, Number.isInteger(run.codexUsage?.[key]) && run.codexUsage[key] >= 0 ? run.codexUsage[key] : 0]));
-function runSummary(run, project, { manual = false, canRetryValidation = false } = {}) {
+function runSummary(run, project, { manual = false, canRetryValidation = false, canRecover = false, canGrantRepair = false } = {}) {
   const phases = project?.plan?.phases || [];
   const tasks = phases.flatMap(phase => phase.tasks);
   const completed = tasks.filter(task => task.completed).length;
@@ -30,6 +30,8 @@ function runSummary(run, project, { manual = false, canRetryValidation = false }
     applicationValidationStatus: mobile ? (flutterTest?.passed && latestValidation?.passed ? 'Passed' : flutterTest ? 'Failed' : 'Not run') : null,
     androidApkStatus: mobile ? (apkLabels[apkStatus] || 'Not built') : null,
     canPause: !['paused', 'completed', 'failed', 'abandoned'].includes(run.state), canResume: run.state === 'paused' && !attention,
+    canRecover: manual && run.state === 'paused' && attention && canRecover,
+    canGrantRepair: manual && run.state === 'paused' && attention && canGrantRepair,
     canAbandon: manual && run.state === 'paused' && !attention, canRetryValidation: manual && canRetryValidation,
     blocksNewRun: blocksNewAutonomousRun(run) };
 }
@@ -39,6 +41,8 @@ function eventSummary(event, run, project) {
     project_created: 'Project, requirements and workspace created', plan_created: 'Development plan created', task_started: 'Task started', task_completed: 'Task completed', task_failed: 'Task failed',
     validation_started: 'Tests running', validation_passed: 'Validation passed', validation_failed: 'Validation failed', fix_started: 'Repair started',
     failure_analyzed: 'Failure reviewed', codex_budget_exhausted: 'Codex call budget exhausted', repair_no_progress: 'Repair made no progress', project_completed: 'Project completed', project_failed: 'Project failed', run_paused: 'Run paused', run_resumed: 'Run resumed', run_abandoned: 'Run abandoned', validation_infrastructure_retry_started: 'Validation infrastructure recovery started',
+    operator_review_acknowledged: 'Operator review acknowledged; waiting for Resume',
+    operator_repair_granted: 'One repair attempt granted; waiting for Resume', operator_repair_grant_consumed: 'Operator repair grant used',
     run_recovered: 'Interrupted run paused after restart', infrastructure_recovered: 'Infrastructure reconciled', approval_allowed: 'Local action authorized', approval_denied: 'Operator authorization required' };
   return { id: event.id, type: event.type, timestamp: event.timestamp,
     message: event.type === 'state_changed' ? `Stage: ${labels[event.to] || 'Updated'}` : ['codex_budget_exhausted', 'repair_no_progress'].includes(event.type) ? text(event.reason) : `${names[event.type] || 'Run updated'}${task ? `: ${text(task.title)}` : ''}` };

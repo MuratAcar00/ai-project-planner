@@ -120,6 +120,104 @@ class AutonomousProjectService {
       return result;
     });
   }
+  async attentionRecoveryEligible(run) {
+    if (!run || run.state !== 'paused' || run.needsAttention !== true || run.resumeState !== 'fixing'
+      || run.pendingFailure?.kind !== 'validation' || run.pendingFailure.infrastructureError !== false
+      || run.failureAnalysis?.recoverable !== true || run.failureAnalysis.category === 'infrastructure'
+      || !this.failureAnalyzer.analyze(run.pendingFailure).recoverable || this.jobs.has(run.id)) return false;
+    // Restart replaces pauseReason, so retain the safety meaning of earlier stop events.
+    const checkpoint = (run.events || []).filter(item => ['run_recovered', 'run_resumed', 'run_paused', 'operator_review_acknowledged'].includes(item.type)).at(-1);
+    if (checkpoint?.type !== 'run_recovered'
+      || run.events.some(item => ['codex_budget_exhausted', 'repair_no_progress'].includes(item.type))
+      || codexUsage(run).repairCalls >= CODEX_BUDGET.repairCalls
+      || (!run.activeFixTaskId && run.fixAttempts >= run.maxFixAttempts)) return false;
+    const project = run.projectId && await this.projectRepository.get(run.projectId);
+    return Boolean(project && !allTasks(project).some(task => task.status === 'running')
+      && !(project.runs || []).some(execution => execution.status === 'running' || this.executionService.jobs?.has(execution.id)));
+  }
+  async canRecoverAttention(id) {
+    return this.approvalGate.check('operator_recovery').allowed === true
+      && await this.attentionRecoveryEligible(await this.runRepository.get(id));
+  }
+  async acknowledgeAttention(id) {
+    await this.initialize();
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run) return null;
+      if (this.approvalGate.check('operator_recovery').allowed !== true) {
+        throw Object.assign(new Error('Trusted server operator authorization is required.'), { status: 403 });
+      }
+      if (!await this.attentionRecoveryEligible(run)) {
+        throw Object.assign(new Error('Run is not eligible for operator-review recovery.'), { status: 409 });
+      }
+      return this.runRepository.update(id, stored => {
+        if (JSON.stringify(stored) !== JSON.stringify(run)) {
+          throw Object.assign(new Error('Operator-review checkpoint changed. Review it again.'), { status: 409 });
+        }
+        stored.needsAttention = false;
+        stored.pauseReason = 'Operator review acknowledged. Explicit Resume is required to continue.';
+        stored.updatedAt = new Date().toISOString();
+        event(stored, 'operator_review_acknowledged', { resumeState: stored.resumeState, previousPauseReason: run.pauseReason, authorization: 'operator_recovery' });
+        return true;
+      });
+    });
+  }
+  hasOperatorRepairGrant(run) {
+    const grant = run.operatorRepairGrant;
+    return grant?.status === 'available' && grant.amount === 1
+      && grant.repairCallsAtGrant === codexUsage(run).repairCalls;
+  }
+  async repairGrantEligible(run) {
+    if (!run || run.state !== 'paused' || run.needsAttention !== true || run.resumeState !== 'fixing'
+      || this.executionProvider !== 'codex' || this.jobs.has(run.id) || run.activeFixTaskId
+      || run.operatorRepairGrant?.status === 'available'
+      || codexUsage(run).repairCalls < CODEX_BUDGET.repairCalls
+      || !Number.isInteger(run.fixAttempts) || !Number.isInteger(run.maxFixAttempts) || run.fixAttempts >= run.maxFixAttempts
+      || !['validation', 'task'].includes(run.pendingFailure?.kind)
+      || run.failureAnalysis?.recoverable !== true || run.failureAnalysis.category === 'infrastructure'
+      || !this.failureAnalyzer.analyze(run.pendingFailure).recoverable) return false;
+    // A restart can replace pauseReason; require the latest actual stop to be a repair budget stop.
+    const stop = (run.events || []).filter(item => ['codex_budget_exhausted', 'repair_no_progress', 'run_paused',
+      'run_resumed', 'project_failed', 'operator_repair_granted', 'operator_review_acknowledged'].includes(item.type)).at(-1);
+    if (stop?.type !== 'codex_budget_exhausted' || stop.budgetType !== 'repair') return false;
+    const project = run.projectId && await this.projectRepository.get(run.projectId);
+    if (!project || project.autonomousRunId !== run.id
+      || allTasks(project).some(task => task.status === 'running' || (task.isFix && !task.completed))
+      || (project.runs || []).some(execution => execution.status === 'running' || this.executionService.jobs?.has(execution.id))) return false;
+    if (run.pendingFailure.kind === 'task' && !allTasks(project).some(task => task.id === run.pendingFailure.taskId && !task.isFix)) return false;
+    return !await this.repairWithoutProgress(run, project);
+  }
+  async canGrantRepair(id) {
+    return this.approvalGate.check('operator_repair_grant').allowed === true
+      && await this.repairGrantEligible(await this.runRepository.get(id));
+  }
+  async grantRepair(id) {
+    await this.initialize();
+    return this.serialize(async () => {
+      const run = await this.runRepository.get(id);
+      if (!run) return null;
+      if (this.approvalGate.check('operator_repair_grant').allowed !== true) {
+        throw Object.assign(new Error('Trusted server operator authorization is required.'), { status: 403 });
+      }
+      if (!await this.repairGrantEligible(run)) {
+        throw Object.assign(new Error('Run is not eligible for an additional repair attempt.'), { status: 409 });
+      }
+      return this.runRepository.update(id, stored => {
+        if (JSON.stringify(stored) !== JSON.stringify(run)) {
+          throw Object.assign(new Error('Repair budget checkpoint changed. Review it again.'), { status: 409 });
+        }
+        const grant = { id: makeId('repair-grant'), amount: 1, status: 'available',
+          grantedAt: new Date().toISOString(), repairCallsAtGrant: codexUsage(stored).repairCalls };
+        stored.operatorRepairGrant = grant;
+        stored.needsAttention = false;
+        stored.pauseReason = 'One additional repair attempt granted. Explicit Resume is required to continue.';
+        stored.updatedAt = grant.grantedAt;
+        event(stored, 'operator_repair_granted', { grantId: grant.id, amount: 1,
+          repairCallsAtGrant: grant.repairCallsAtGrant, authorization: 'operator_repair_grant' });
+        return true;
+      });
+    });
+  }
   async abandon(id) {
     await this.initialize();
     return this.serialize(async () => {
@@ -561,6 +659,18 @@ class AutonomousProjectService {
         current.status = 'ready';
         return true;
       });
+      // Reserve the extra call durably before execution starts. Never refund it after an
+      // interrupted/failed launch: the operator must review any subsequent budget stop.
+      if (this.executionProvider === 'codex' && task.isFix && codexUsage(currentRun).repairCalls >= CODEX_BUDGET.repairCalls) {
+        await this.runRepository.update(id, run => {
+          if (!this.hasOperatorRepairGrant(run)) throw new Error('Operator repair grant is no longer available.');
+          const grant = run.operatorRepairGrant;
+          Object.assign(grant, { status: 'consumed', consumedAt: new Date().toISOString(), taskId: task.id });
+          run.updatedAt = grant.consumedAt;
+          event(run, 'operator_repair_grant_consumed', { grantId: grant.id, taskId: task.id, amount: 1 });
+          return true;
+        });
+      }
       const result = await this.executionService.startTask(project, task, { provider: this.executionProvider,
         executionType: task.isFix ? 'repair' : 'build', onExecutionStart: this.executionProvider === 'codex' ? async executionRunId => {
           await this.recordCodexStart(id, executionRunId, task.isFix ? 'repair' : 'build');
@@ -593,15 +703,19 @@ class AutonomousProjectService {
     }
     return { failed, error: current.error || result?.error, output: current.result };
   }
-  async blockRepairWithoutProgress(run, project) {
+  async repairWithoutProgress(run, project) {
     if (!run.pendingFailure || run.failureAnalysis?.category === 'infrastructure' ||
         this.failureAnalyzer.analyze(run.pendingFailure).category === 'infrastructure' || !run.repairProgress) return false;
     const fingerprint = failureFingerprint(run.pendingFailure);
     if (fingerprint !== run.repairProgress.failureFingerprint) return false;
     try {
       const workspacePath = await this.workspaceService.getWorkspacePath(project.id);
-      if (await workspaceFingerprint(workspacePath) !== run.repairProgress.workspaceFingerprint) return false;
+      return await workspaceFingerprint(workspacePath) === run.repairProgress.workspaceFingerprint;
     } catch { return false; }
+  }
+  async blockRepairWithoutProgress(run, project) {
+    if (!await this.repairWithoutProgress(run, project)) return false;
+    const fingerprint = failureFingerprint(run.pendingFailure);
     const reason = 'Repair made no progress: failure and workspace are unchanged.';
     const updated = await this.runRepository.update(run.id, stored => {
       if (stored.state !== 'fixing') return false;
@@ -620,6 +734,7 @@ class AutonomousProjectService {
     const usage = codexUsage(run);
     const counter = type === 'repair' ? 'repairCalls' : 'buildCalls';
     if (usage[counter] < CODEX_BUDGET[counter]) return true;
+    if (type === 'repair' && this.hasOperatorRepairGrant(run)) return true;
     const reason = `${type === 'repair' ? 'Repair' : 'Build'} Codex call budget exhausted`;
     const updated = await this.runRepository.update(run.id, stored => {
       if (stored.state !== 'paused') {

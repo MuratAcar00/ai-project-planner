@@ -60,7 +60,9 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     const canRetryValidation = manual
       && typeof autonomous.canRetryValidationInfrastructureFailure === 'function'
       && await autonomous.canRetryValidationInfrastructureFailure(run.id);
-    return runSummary(run, run.projectId ? await repository.get(run.projectId) : null, { manual, canRetryValidation });
+    return runSummary(run, run.projectId ? await repository.get(run.projectId) : null, { manual, canRetryValidation,
+      canRecover: manual && !await mode.active() && typeof autonomous.canRecoverAttention === 'function' && await autonomous.canRecoverAttention(run.id),
+      canGrantRepair: manual && !await mode.active() && typeof autonomous.canGrantRepair === 'function' && await autonomous.canGrantRepair(run.id) });
   };
   const ready = Promise.all([execution.initialize(), autonomous.initialize(), mode.initialize()]);
   app.use((req, res, next) => { ready.then(() => next(), next); });
@@ -129,6 +131,27 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
       res.status(202).json(await present(run));
     } catch (error) {
       if (error.status === 409 || error.message.startsWith('Run must be paused')) return res.status(409).json({ error: error.message });
+      next(error);
+    }
+  });
+  for (const [route, action] of [['recover', 'recover'], ['grant-repair', 'grantRepair']]) app.post(`/api/autonomous/:id/${route}`, async (req, res, next) => {
+    try {
+      let hostname;
+      try { hostname = new URL(`http://${req.get('host')}`).hostname; } catch { /* Reject invalid Host. */ }
+      if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress) || !['localhost', '127.0.0.1', '[::1]'].includes(hostname)) return res.status(403).json({ error: 'Operator recovery is localhost only.' });
+      if (Object.hasOwn(req.headers, 'origin')) {
+        try {
+          const origin = new URL(req.get('origin'));
+          const localOrigin = new URL(`${req.protocol}://${req.get('host')}`).origin;
+          if (origin.origin !== localOrigin || origin.pathname !== '/' || origin.search || origin.hash || origin.username || origin.password) return res.status(403).json({ error: 'Cross-origin control is disabled.' });
+        } catch { return res.status(403).json({ error: 'Invalid origin.' }); }
+      }
+      if (Object.keys(req.query).length || !req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length) return res.status(400).json({ error: 'This action takes no configuration.' });
+      if (!await autonomous.runRepository.get(req.params.id)) return res.status(404).json({ error: 'Autonomous run not found.' });
+      const run = await mode.manualControl(req.params.id, action);
+      res.json(await present(run));
+    } catch (error) {
+      if ([403, 409].includes(error.status)) return res.status(error.status).json({ error: error.message });
       next(error);
     }
   });
