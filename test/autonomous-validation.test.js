@@ -50,7 +50,7 @@ test('mobile validation runs Flutter tests followed by the Android debug APK bui
   assert.equal(result.passed, true);
   assert.deepEqual(result.checks.map(check => check.name), ['flutter-test', 'android-debug-apk']);
   assert.deepEqual(result.artifactStatus, { androidApk: { status: 'built' } });
-  assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['flutter', ['test']], ['flutter', ['build', 'apk', '--debug']]]);
+  assert.deepEqual(f.calls.map(call => [call.command, call.args]), [['flutter', ['test', '--no-pub']], ['flutter', ['build', 'apk', '--debug', '--no-pub']]]);
   assert.ok(f.calls.every(call => call.cwd === f.workspace));
   assert.ok(f.calls.every(call => call.options.flutterCachePath === path.join(f.workspace, '.validation', 'fake-flutter-cache')));
   assert.equal(await fs.stat(path.join(f.workspace, '.validation', 'fake-flutter-cache')).then(() => true, () => false), false);
@@ -185,7 +185,7 @@ test('Gradle wrapper URL selects and privately seeds only its exact trusted cach
   };
   const flutterCachePath = path.join(workspace, '.validation', 'fake-flutter-cache');
   await fs.mkdir(flutterCachePath);
-  await runner.run(workspace, 'flutter', ['build', 'apk', '--debug'], { flutterCachePath, gradleDistributionPath: selected.path });
+  await runner.run(workspace, 'flutter', ['build', 'apk', '--debug', '--no-pub'], { flutterCachePath, gradleDistributionPath: selected.path });
   assert.equal(invocation.args.some((value, index) => ['--bind', '--ro-bind'].includes(value) && invocation.args[index + 1]?.startsWith(path.join(root, 'trusted'))), false);
   assert.equal(invocation.args.some((value, index) => value === '--bind' && invocation.args[index + 1] === root), false);
   assert.equal(invocation.options.shell, false);
@@ -237,7 +237,7 @@ test('missing or unsafe Gradle distributions remain optional APK infrastructure 
     assert.equal(result.checks.at(-1).infrastructureError, true);
     assert.match(result.checks.at(-1).error, expected);
     assert.deepEqual(result.artifactStatus, { androidApk: { status: 'infrastructure-unavailable', message: result.checks.at(-1).error } });
-    assert.deepEqual(f.calls.map(call => call.args), [['test']]);
+    assert.deepEqual(f.calls.map(call => call.args), [['test', '--no-pub']]);
   }
 });
 
@@ -376,7 +376,7 @@ test('Flutter cache is privately seeded, mounted over the read-only SDK cache fo
   assert.notEqual(cache.path, sourceCache);
   await fs.writeFile(path.join(cache.path, 'engine.realm'), 'private-change');
   assert.equal(await fs.readFile(path.join(sourceCache, 'engine.realm'), 'utf8'), '');
-  for (const args of [['test'], ['build', 'apk', '--debug']]) {
+  for (const args of [['test', '--no-pub'], ['build', 'apk', '--debug', '--no-pub']]) {
     assert.equal((await runner.run(workspace, 'flutter', args, { flutterCachePath: cache.path })).passed, true);
   }
   assert.equal(invocations.length, 2);
@@ -385,6 +385,7 @@ test('Flutter cache is privately seeded, mounted over the read-only SDK cache fo
     assert.ok(invocation.args.includes('--unshare-all'));
     assert.ok(invocation.args.some((value, index) => value === '--ro-bind' && invocation.args[index + 1] === flutterRoot && invocation.args[index + 2] === flutterRoot));
     assert.ok(invocation.args.some((value, index) => value === '--bind' && invocation.args[index + 1] === cache.path && invocation.args[index + 2] === path.join(flutterRoot, 'bin', 'cache')));
+    assert.ok(invocation.args.some((value, index) => value === '--setenv' && invocation.args[index + 1] === 'PUB_CACHE'));
     assert.ok(invocation.args.some((value, index) => value === '--ro-bind' && invocation.args[index + 1] === '/etc/java-17-openjdk/security' && invocation.args[index + 2] === '/run/autonomous-jdk-security-0'));
     assert.ok(invocation.args.some((value, index) => value === '--symlink' && invocation.args[index + 1] === '/run/autonomous-jdk-security-0' && invocation.args[index + 2] === '/etc/java-17-openjdk/security'));
     assert.ok(invocation.args.some((value, index) => value === '--chmod' && invocation.args[index + 1] === '0555' && invocation.args[index + 2] === '/run'));
@@ -405,8 +406,8 @@ test('Flutter cache is privately seeded, mounted over the read-only SDK cache fo
     assert.equal(invocation.options.cwd, workspace);
     assert.equal(invocation.args.includes('--share-net'), false);
   }
-  assert.deepEqual(invocations[0].args.slice(-2), [path.join(flutterRoot, 'bin', 'flutter'), 'test']);
-  assert.deepEqual(invocations[1].args.slice(-4), [path.join(flutterRoot, 'bin', 'flutter'), 'build', 'apk', '--debug']);
+  assert.deepEqual(invocations[0].args.slice(-3), [path.join(flutterRoot, 'bin', 'flutter'), 'test', '--no-pub']);
+  assert.deepEqual(invocations[1].args.slice(-5), [path.join(flutterRoot, 'bin', 'flutter'), 'build', 'apk', '--debug', '--no-pub']);
   await runner.cleanupFlutterCache(workspace, cache);
   assert.equal(await fs.stat(cache.path).then(() => true, () => false), false);
   await assert.rejects(() => runner.run(workspace, 'flutter', ['build', 'ios'], { flutterCachePath: cache.path }));

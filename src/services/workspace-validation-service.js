@@ -172,7 +172,7 @@ class SandboxValidationRunner {
   }
   async run(workspace, command, args, { flutterCachePath = null, gradleDistributionPath = null } = {}) {
     if (!['node', 'npm', 'flutter'].includes(command)) throw new Error('Unsupported validation command.');
-    if (command === 'flutter' && !((args.length === 1 && args[0] === 'test') || (args.length === 3 && args[0] === 'build' && args[1] === 'apk' && args[2] === '--debug'))) throw new Error('Unsupported Flutter validation command.');
+    if (command === 'flutter' && !((args.length === 2 && args[0] === 'test' && args[1] === '--no-pub') || (args.length === 4 && args[0] === 'build' && args[1] === 'apk' && args[2] === '--debug' && args[3] === '--no-pub'))) throw new Error('Unsupported Flutter validation command.');
     const mounts = [];
     let executable = `/usr/bin/${command}`;
     let validationPath = '/usr/bin:/bin';
@@ -403,7 +403,7 @@ class WorkspaceValidationService {
     try {
       if (this.runner.prepareFlutterCache) cache = await this.runner.prepareFlutterCache(workspace);
       let testResult;
-      try { testResult = await this.runner.run(workspace, 'flutter', ['test'], { flutterCachePath: cache?.path || null }); }
+      try { testResult = await this.runner.run(workspace, 'flutter', ['test', '--no-pub'], { flutterCachePath: cache?.path || null }); }
       catch (error) { testResult = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
       const testEvidence = `${testResult.output || ''}\n${testResult.error || ''}`;
       if (!testResult.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(testEvidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(testEvidence) || JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE.test(testEvidence) || /(?:flutter|dart|gradle|android sdk|java|toolchain).{0,80}(?:not found|not installed|unavailable|could not be started|failed to start|unable to locate|not configured|permission denied|no such file)|(?:unable to locate|could not find).{0,80}(?:android sdk|flutter|java)|licenses? (?:not accepted|not been accepted)|failed to (?:download|downloaded) (?:the )?gradle(?: distribution)?|(?:UnknownHostException|unknown host).{0,100}services\.gradle\.org|could not (?:resolve host|get resource)|connection timed out|could not start gradle|unable to start the daemon process|could not determine java version/i.test(testEvidence))) testResult.infrastructureError = true;
@@ -424,7 +424,7 @@ class WorkspaceValidationService {
         }
         if (gradleDistribution) {
           let apkResult;
-          try { apkResult = await this.runner.run(workspace, 'flutter', ['build', 'apk', '--debug'], { flutterCachePath: cache?.path || null, gradleDistributionPath: gradleDistribution.path }); }
+          try { apkResult = await this.runner.run(workspace, 'flutter', ['build', 'apk', '--debug', '--no-pub'], { flutterCachePath: cache?.path || null, gradleDistributionPath: gradleDistribution.path }); }
           catch (error) { apkResult = { passed: false, infrastructureError: true, error: String(error.message || error).slice(0, 1000) }; }
           const evidence = `${apkResult.output || ''}\n${apkResult.error || ''}`;
           if (!apkResult.passed && (FLUTTER_CACHE_INFRASTRUCTURE.test(evidence) || FLUTTER_TOOLCHAIN_DISCOVERY_INFRASTRUCTURE.test(evidence) || JAVA_SECURITY_CONFIGURATION_INFRASTRUCTURE.test(evidence) || GRADLE_WRAPPER_CACHE_INFRASTRUCTURE.test(evidence))) apkResult.infrastructureError = true;
