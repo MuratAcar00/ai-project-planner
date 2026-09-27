@@ -60,6 +60,8 @@ test('autonomous planner adapts architecture, requirements and tasks to web, mob
   assert.match(plans[1].phases[1].tasks[0].description, /AnimatedContainer/);
   assert.match(plans[1].phases[1].tasks[0].description, /150–350ms/);
   assert.match(plans[1].phases[1].tasks[0].description, /common small phone sizes/);
+  assert.match(plans[1].phases[2].tasks[0].description, /dispose a SemanticsHandle before the test body ends/);
+  assert.match(plans[1].phases[2].tasks[0].description, /scrollUntilVisible using the actual scrollable/);
   assert.match(plans[1].architecture, /mostly rounded rectangles/);
   assert.match(plans[1].phases[0].tasks[0].description, /must not be the production default/);
   assert.ok(plans[1].phases[0].tasks[0].acceptanceCriteria.some(item => /survives app termination and restart/.test(item)));
