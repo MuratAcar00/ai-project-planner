@@ -28,14 +28,14 @@ function validateStart(input = {}) {
 
 class AutonomousProjectService {
   constructor({ runRepository, projectRepository, projectService, executionService, workspaceService,
-    ideaProvider, ideaEvaluator, validationService, approvalGate, flutterScaffolder = null, executionProvider = 'codex', maxFixAttempts, maxIdeaBatches = Number(process.env.MAX_IDEA_BATCHES ?? 4), failureAnalyzer = new FailureAnalyzer() }) {
+    ideaProvider, ideaEvaluator, validationService, approvalGate, flutterScaffolder = null, executionProvider = 'codex', maxFixAttempts, maxIdeaBatches = Number(process.env.MAX_IDEA_BATCHES ?? 4), failureAnalyzer = new FailureAnalyzer(), publishedProjectsRoot = null }) {
     Object.assign(this, { runRepository, projectRepository, projectService, executionService, workspaceService,
       ideaProvider, ideaEvaluator, validationService, approvalGate,
       flutterScaffolder: flutterScaffolder || new FlutterWorkspaceScaffolder({ workspaceService, projectRepository }), executionProvider, failureAnalyzer });
     this.maxFixAttempts = fixLimit(maxFixAttempts);
     if (!Number.isInteger(maxIdeaBatches) || maxIdeaBatches < 1 || maxIdeaBatches > 10) throw new Error('MAX_IDEA_BATCHES must be between 1 and 10.');
     this.maxIdeaBatches = maxIdeaBatches;
-    this.novelty = new IdeaNoveltyService();
+    this.novelty = new IdeaNoveltyService({ publishedProjectsRoot });
     this.jobs = new Map();
     this.control = Promise.resolve();
     this.initialization = null;

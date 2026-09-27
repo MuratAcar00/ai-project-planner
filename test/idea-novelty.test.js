@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 const { fixture, finish, deferred } = require('./autonomous-helpers');
 const { TemplateIdeaProvider } = require('../src/providers/template-idea-provider');
 const { LocalIdeaProvider } = require('../src/providers/local-idea-provider');
@@ -34,6 +37,20 @@ test('history includes completed, building, paused and failed selections and man
   const history = await new IdeaNoveltyService().history(f.dependencies.projectRepository, f.dependencies.runRepository);
   assert.equal(history.length, 5);
   assert.ok(history.some(h => h.name === 'paused'));
+});
+
+test('published project markers prevent duplicate ideas after runtime stores are lost', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'published-ideas-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'document-watch'));
+  await fs.writeFile(path.join(root, 'document-watch', '.factory-publish.json'), '{}');
+  await fs.mkdir(path.join(root, 'unpublished-draft'));
+  const novelty = new IdeaNoveltyService({ publishedProjectsRoot: root });
+  const empty = { async list() { return []; } };
+  const history = await novelty.history(empty, empty);
+  assert.deepEqual(history, [{ name: 'document watch' }]);
+  assert.equal(novelty.check({ name: 'Document Watch' }, history).duplicate, true);
+  assert.equal(novelty.check({ name: 'Unpublished Draft' }, history).duplicate, false);
 });
 
 test('duplicate first batch retries second batch and persists readable rejection', async t => {

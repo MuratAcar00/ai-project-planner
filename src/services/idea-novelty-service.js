@@ -7,13 +7,31 @@ function similarity(a, b) {
   return 2 * [...left].filter(word => right.has(word)).length / (left.size + right.size);
 }
 class IdeaNoveltyService {
+  constructor({ publishedProjectsRoot = null } = {}) {
+    this.publishedProjectsRoot = publishedProjectsRoot;
+  }
+  async publishedHistory() {
+    if (!this.publishedProjectsRoot) return [];
+    let directories;
+    try { directories = await fs.readdir(this.publishedProjectsRoot, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    const names = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory()) continue;
+      try {
+        const marker = await fs.lstat(path.join(this.publishedProjectsRoot, directory.name, '.factory-publish.json'));
+        if (marker.isFile() && !marker.isSymbolicLink()) names.push({ name: directory.name.replace(/-/g, ' ') });
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return names;
+  }
   async history(projectRepository, runRepository, excludeRunId) {
-    const [projects, runs] = await Promise.all([projectRepository.list(), runRepository.list()]);
+    const [projects, runs, published] = await Promise.all([projectRepository.list(), runRepository.list(), this.publishedHistory()]);
     const entries = projects.filter(p => !excludeRunId || p.autonomousRunId !== excludeRunId).map(p => p.idea || runs.find(run => run.id === p.autonomousRunId)?.selection?.selected || { name: p.name, problem: p.description });
     for (const run of runs) {
       if (run.id !== excludeRunId && run.selection?.selected && !projects.some(p => p.autonomousRunId === run.id)) entries.push(run.selection.selected);
     }
-    return entries;
+    return [...entries, ...published];
   }
   check(idea, history) {
     const workflow = item => [item.coreWorkflow, item.solution, ...(item.coreFeatures || [])].filter(Boolean).join(' ');
@@ -31,3 +49,5 @@ class IdeaNoveltyService {
   }
 }
 module.exports = { IdeaNoveltyService, normalize, similarity };
+const fs = require('node:fs/promises');
+const path = require('node:path');

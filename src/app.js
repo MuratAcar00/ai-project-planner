@@ -44,6 +44,7 @@ function createApp({ dataFile, projectRepository, plannerService, executionServi
     ideaProvider: new LocalIdeaProvider(), ideaEvaluator: new IdeaEvaluator(),
     validationService: new WorkspaceValidationService({ workspaceService: workspaces, projectRepository: repository }),
     flutterScaffolder: new FlutterWorkspaceScaffolder({ workspaceService: workspaces, projectRepository: repository }),
+    publishedProjectsRoot: path.join(__dirname, '..', 'projects'),
     approvalGate: approvalGate || new ApprovalGate()
   });
   const runtime = runtimeService || new GeneratedAppRuntimeService({ projectRepository: repository, runRepository: autonomous.runRepository, workspaceService: workspaces });
